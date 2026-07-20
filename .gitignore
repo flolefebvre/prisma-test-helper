@@ -1,5 +1,6 @@
 node_modules
 dist
+tests/generated
 *.log
 .DS_Store
 .env
