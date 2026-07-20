@@ -11,6 +11,9 @@ export default defineConfig({
           include: ["src/**/*.test.ts"],
           clearMocks: true,
           restoreMocks: true,
+          // Distinct groupOrder is required when projects differ in maxWorkers;
+          // ordering unit first keeps the cheap feedback ahead of the container boot.
+          sequence: { groupOrder: 0 },
         },
       },
       // Boots a real container via the repo's own global-setup file — the same
@@ -24,6 +27,7 @@ export default defineConfig({
           pool: "forks",
           // Pinned so the suite can assert the exact set of Worker Databases.
           maxWorkers: 2,
+          sequence: { groupOrder: 1 },
         },
       },
     ],
