@@ -79,7 +79,9 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
       migrate(container.getConnectionUri());
       await cloneWorkerDatabases(container, databaseName, workerCount(project));
     } catch (error) {
-      await container.stop();
+      // A failed stop (e.g. the daemon died, failing migrate and stop alike) must not
+      // mask the diagnostic error being thrown; Ryuk reaps the container regardless.
+      await container.stop().catch(() => {});
       throw error;
     }
 

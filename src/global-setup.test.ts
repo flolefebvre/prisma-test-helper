@@ -185,6 +185,15 @@ describe("createGlobalSetup", () => {
     expect(postgres.started.stop).toHaveBeenCalledTimes(1);
   });
 
+  test("keeps the diagnostic error even when stopping the container also fails", async () => {
+    (execFileSync as Mock).mockImplementationOnce(() => {
+      throw Object.assign(new Error("exit 1"), { stdout: "P3018: migration failed", stderr: "" });
+    });
+    postgres.started.stop.mockRejectedValueOnce(new Error("daemon gone"));
+
+    await expect(runSetup()).rejects.toThrow(/P3018: migration failed/);
+  });
+
   test("surfaces the psql output when cloning fails, and stops the container", async () => {
     postgres.started.exec.mockResolvedValueOnce({ exitCode: 1, output: "ERROR: already exists" });
 
