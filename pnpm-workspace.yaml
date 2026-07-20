@@ -1,0 +1,8 @@
+# Build scripts are opt-in under pnpm >=10; Prisma's fetch its engines, the CLI
+# needs them. The rest (ssh2, protobufjs, cpu-features) work fine unbuilt.
+allowBuilds:
+  "@prisma/engines": true
+  cpu-features: false
+  prisma: true
+  protobufjs: false
+  ssh2: false
