@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    // The tarball ships dist/ only, so maps would point at a src/ that isn't there.
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules", "**/*.test.ts"]
+}

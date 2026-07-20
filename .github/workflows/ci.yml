@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate fixture Prisma client
+        run: pnpm run generate
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Duplication check
+        run: pnpm run duplicates
+
+      - name: Unit tests (Docker-free)
+        run: pnpm run test:unit
+
+      # ubuntu-latest ships a running Docker daemon; the run boots a real Postgres
+      # container through the repo's own global-setup wiring.
+      - name: Integration tests
+        run: pnpm run test:integration
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Check packed contents
+        run: |
+          npm pack --dry-run --json > pack.json
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const [{ files }] = JSON.parse(readFileSync('pack.json', 'utf8'));
+            const paths = files.map((file) => file.path);
+            const allowed = /^(dist\/|README\.md\$|LICENSE\$|package\.json\$)/;
+            const stray = paths.filter((path) => !allowed.test(path));
+            if (stray.length > 0) {
+              console.error('Unexpected files in tarball:', stray);
+              process.exit(1);
+            }
+            if (!paths.includes('dist/global-setup.js')) {
+              console.error('dist/global-setup.js missing from tarball');
+              process.exit(1);
+            }
+            console.log('Tarball OK:', paths.join(', '));
+          "

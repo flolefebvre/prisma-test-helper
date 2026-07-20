@@ -1,0 +1,84 @@
+{
+  "name": "@flolefebvre/prisma-test-helper",
+  "version": "0.0.1",
+  "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per worker. Postgres-only.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Florian Lefebvre <florian.lefebvre.contact@gmail.com>",
+  "homepage": "https://github.com/flolefebvre/prisma-test-helper#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flolefebvre/prisma-test-helper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/flolefebvre/prisma-test-helper/issues"
+  },
+  "keywords": [
+    "prisma",
+    "vitest",
+    "postgres",
+    "testcontainers",
+    "testing",
+    "test-database",
+    "isolation"
+  ],
+  "sideEffects": false,
+  "exports": {
+    "./global-setup": {
+      "types": "./dist/global-setup.d.ts",
+      "default": "./dist/global-setup.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "generate": "prisma generate",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "lint": "eslint --max-warnings 0",
+    "duplicates": "jscpd",
+    "format": "prettier -w .",
+    "format:check": "prettier -c .",
+    "gate": "pnpm run typecheck && pnpm run lint && pnpm run duplicates && pnpm run test && pnpm run build",
+    "prepublishOnly": "pnpm run clean && pnpm run build"
+  },
+  "dependencies": {
+    "@testcontainers/postgresql": "^12.0.4",
+    "testcontainers": "^12.0.4"
+  },
+  "peerDependencies": {
+    "prisma": "^7.0.0",
+    "vitest": "^4.0.0"
+  },
+  "devDependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "@types/node": "^20.19.43",
+    "eslint": "^10.6.0",
+    "jscpd": "^5.0.12",
+    "prettier": "^3.9.4",
+    "prisma": "^7.8.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.62.0",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.6.0",
+      "onFail": "warn"
+    }
+  }
+}

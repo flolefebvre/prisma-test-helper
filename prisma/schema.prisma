@@ -1,0 +1,24 @@
+// Fixture schema for this repo's own tests: the smallest shape that exercises a
+// migration and a required relation. It never ships — `files` whitelists `dist/`.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../tests/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Author {
+  id    Int    @id @default(autoincrement())
+  name  String
+  posts Post[]
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  title    String
+  author   Author @relation(fields: [authorId], references: [id])
+  authorId Int
+}
