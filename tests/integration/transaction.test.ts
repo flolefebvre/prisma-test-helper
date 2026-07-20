@@ -138,10 +138,12 @@ describe("lifecycle", () => {
 
     // Assert: the engine serves the next test. The pool may hand back the dead
     // connection once — a failed `start()` must reset, so one retry succeeds; a wedged
-    // engine fails both with "already live".
+    // engine fails both with "already live". The count is scoped to a name nothing
+    // writes: other integration files commit rows into this Worker Database, so a bare
+    // table count would couple this test to them.
     await engine.start().catch(() => engine.start());
     try {
-      expect(await engine.client.author.count()).toBe(0);
+      expect(await engine.client.author.count({ where: { name: "tx-killed" } })).toBe(0);
     } finally {
       await engine.rollback();
     }
@@ -168,6 +170,18 @@ describe("call-time routing", () => {
     } finally {
       await engine.rollback();
     }
+  });
+
+  test("connection-level $-methods execute through the proxy on the underlying client", async () => {
+    // Arrange: a dedicated client, so disconnecting it cannot break other tests.
+    const extra = new PrismaClient({ adapter: new PrismaPg({ connectionString: workerUrl }) });
+    const engine = new TestTransaction(extra, workerUrl, "prisma_test");
+
+    // Act + Assert: `$connect`/`$disconnect` need no live transaction — they pass
+    // through and run on the real client, not on a routed stand-in.
+    await expect(engine.client.$connect()).resolves.toBeUndefined();
+    await expect(engine.client.$disconnect()).resolves.toBeUndefined();
+    expect(typeof engine.client.$on).toBe("function");
   });
 
   test("$queryRaw routes to the live transaction", async () => {
