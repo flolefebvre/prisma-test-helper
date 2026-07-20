@@ -41,6 +41,9 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      - name: Duplication check
+        run: pnpm run duplicates
+
       - name: Unit tests (Docker-free)
         run: pnpm run test:unit
 

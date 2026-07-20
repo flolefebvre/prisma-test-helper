@@ -42,9 +42,10 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "lint": "eslint --max-warnings 0",
+    "duplicates": "jscpd",
     "format": "prettier -w .",
     "format:check": "prettier -c .",
-    "gate": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build",
+    "gate": "pnpm run typecheck && pnpm run lint && pnpm run duplicates && pnpm run test && pnpm run build",
     "prepublishOnly": "pnpm run clean && pnpm run build"
   },
   "dependencies": {
@@ -60,6 +61,7 @@
     "@prisma/client": "^7.8.0",
     "@types/node": "^20.19.43",
     "eslint": "^10.6.0",
+    "jscpd": "^5.0.12",
     "prettier": "^3.9.4",
     "prisma": "^7.8.0",
     "typescript": "^5.9.3",
