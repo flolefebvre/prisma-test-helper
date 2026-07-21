@@ -64,9 +64,12 @@ export function registerResetHook(hook: ResetHook): void {
  * Wraps every test in its own Test Transaction: a `beforeEach` opens it and runs the
  * Reset Hooks; an `afterEach` rolls it back, discarding every write — the Worker
  * Database itself never changes, so each test starts from the same pristine clone.
- * Because Vitest runs `afterEach` hooks in reverse registration order, cleanup a test
- * registers itself (`onTestFinished`, a later `afterEach`) still runs while the
- * transaction is live.
+ *
+ * Vitest runs `afterEach` hooks in reverse registration order (`sequence.hooks:
+ * "stack"`, the default), so an `afterEach` your file registers *after* this call — or
+ * one inside a nested `describe` — still runs while the transaction is live. Cleanup
+ * registered with `onTestFinished` does *not*: the runner fires those after every
+ * `afterEach`, so they land past the rollback, where the database is out of reach.
  *
  * @example
  * import { setupDatabase } from "@flolefebvre/prisma-test-helper";

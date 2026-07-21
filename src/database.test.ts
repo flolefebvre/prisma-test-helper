@@ -91,12 +91,10 @@ describe("setupDatabase", () => {
   });
 
   test("derives the seed from the test name alone, so a -t rerun reproduces it", () => {
-    // Nothing about the worker, the file, or the run order feeds the seed: the same
-    // name yields the same number in any process.
-    const context = seen.at(-1)!;
-
-    expect(context.seed).toBe(hashName(context.testName));
-    expect(hashName(context.testName)).toBe(hashName(context.testName));
+    // Pinned literal, not a comparison against `hashName` — a self-comparison would hold
+    // even if the seed started drawing on the worker id or the run order. This is the
+    // FNV-1a hash of this test's own full name, so any such drift breaks it.
+    expect(seen.at(-1)!.seed).toBe(1431033295);
   });
 
   test("runs hooks after the transaction opens, and awaits async ones", () => {
@@ -105,6 +103,10 @@ describe("setupDatabase", () => {
   });
 
   test("registers a hook once even when added twice", () => {
-    expect(events.filter((event) => event === "reset hook")).toHaveLength(seen.length);
+    // One entry per invocation, so a Set that stopped deduplicating would leave two
+    // entries bearing this test's name.
+    const thisTest = seen.at(-1)!.testName;
+
+    expect(seen.filter((context) => context.testName === thisTest)).toHaveLength(1);
   });
 });

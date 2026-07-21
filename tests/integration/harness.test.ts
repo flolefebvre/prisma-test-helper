@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
 
 import { isDatabaseSetUp, setupDatabase } from "../../src/index.js";
 import { db } from "../db/client.js";
@@ -49,4 +49,20 @@ test("the relation is gone too", async () => {
   // Assert: both tables, not just the one the test touched directly.
   expect(await db.author.count()).toBe(0);
   expect(await db.post.count()).toBe(0);
+});
+
+// Pins the ordering `setupDatabase`'s docs promise: registered after that call, this
+// hook is *earlier* in the reverse-order stack than the rollback, so the database is
+// still reachable from it. If the rollback ever ran first, the query below would throw
+// the engine's "no test transaction live" error and fail the test.
+let cleanupSawLiveTransaction = false;
+
+afterEach(async () => {
+  await db.author.count();
+  cleanupSawLiveTransaction = true;
+});
+
+test("cleanup registered after setupDatabase() runs inside the live transaction", () => {
+  // Assert on the previous test's afterEach — this one's has not run yet.
+  expect(cleanupSawLiveTransaction).toBe(true);
 });
