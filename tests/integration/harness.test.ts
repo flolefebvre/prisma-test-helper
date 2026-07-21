@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { setupDatabase } from "../../src/index.js";
+import { isDatabaseSetUp, setupDatabase } from "../../src/index.js";
 import { db } from "../db/client.js";
 
 // Ported from pvm3.0's harness suite: the smoke test that the whole recipe works from a
@@ -9,6 +9,11 @@ import { db } from "../db/client.js";
 // Proxy, installed by the Client Seam in tests/setup.ts.
 
 setupDatabase();
+
+test("reports the file as opted in, so factories may run", () => {
+  // The `true` half of the guard; tests/integration/opt-in.test.ts holds the `false` half.
+  expect(isDatabaseSetUp()).toBe(true);
+});
 
 test("inserts an author and reads it back", async () => {
   // Arrange
