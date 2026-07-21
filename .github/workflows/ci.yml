@@ -68,9 +68,11 @@ jobs:
               console.error('Unexpected files in tarball:', stray);
               process.exit(1);
             }
-            if (!paths.includes('dist/global-setup.js')) {
-              console.error('dist/global-setup.js missing from tarball');
-              process.exit(1);
+            for (const entry of ['dist/index.js', 'dist/global-setup.js', 'dist/setup.js']) {
+              if (!paths.includes(entry)) {
+                console.error(entry + ' missing from tarball');
+                process.exit(1);
+              }
             }
             console.log('Tarball OK:', paths.join(', '));
           "

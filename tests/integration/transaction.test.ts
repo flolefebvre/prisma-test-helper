@@ -139,8 +139,10 @@ describe("lifecycle", () => {
     // Assert: the engine serves the next test. The pool may hand back the dead
     // connection once — a failed `start()` must reset, so one retry succeeds; a wedged
     // engine fails both with "already live". The count is scoped to a name nothing
-    // writes: other integration files commit rows into this Worker Database, so a bare
-    // table count would couple this test to them.
+    // writes, so it holds however the pool assigns files to this Worker Database. Since
+    // the dogfood conversion no integration file commits into it — harness.test.ts
+    // depends on that, asserting bare table counts — and a new one that did would flake
+    // that file first.
     await engine.start().catch(() => engine.start());
     try {
       expect(await engine.client.author.count({ where: { name: "tx-killed" } })).toBe(0);

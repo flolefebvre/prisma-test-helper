@@ -14,6 +14,12 @@ declare module "vitest" {
   interface ProvidedContext {
     /** Connection URI of this run's container, pointing at the Template Database. */
     templateDatabaseUri: string;
+    /**
+     * Name of the Template Database the Worker Databases were cloned from. Workers
+     * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Test Transaction
+     * guard derives the shape it admits from it.
+     */
+    templateDatabaseName: string;
   }
 }
 
@@ -86,6 +92,7 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
     }
 
     project.provide("templateDatabaseUri", container.getConnectionUri());
+    project.provide("templateDatabaseName", databaseName);
 
     // Ryuk is the backstop: it removes the whole session even when Vitest is killed
     // and this teardown never runs.

@@ -7,8 +7,12 @@ Database cloned per Vitest worker.
 **Postgres-only.** The harness starts a real Postgres in Docker and relies on
 `CREATE DATABASE … TEMPLATE` for cloning; no other database is supported.
 
-> Early days: only the `global-setup` entry point ships today. The per-worker setup file
-> and the per-test rolled-back Test Transaction are on their way.
+> Early days: all three entry points ship today — `global-setup`, `setup`
+> (`setupWorkerDatabase`), and the main entry (`installTestTransaction`, `setupDatabase`,
+> `registerResetHook`, `isDatabaseSetUp`) — and this repo's own test suite runs on them.
+> The copy-paste recipes below still cover only `global-setup`; the rest arrive with the
+> 0.1.0 docs pass. Until then, `tests/setup.ts` and `vitest.config.ts` in this repo are
+> the working reference.
 
 ## Requirements
 

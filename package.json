@@ -32,6 +32,10 @@
       "types": "./dist/global-setup.d.ts",
       "default": "./dist/global-setup.js"
     },
+    "./setup": {
+      "types": "./dist/setup.d.ts",
+      "default": "./dist/setup.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
