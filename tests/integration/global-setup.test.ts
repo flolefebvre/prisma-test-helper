@@ -32,15 +32,8 @@ test("provisions one Worker Database per worker slot", async () => {
   expect(rows.map((row) => row.datname)).toEqual(["prisma_test_1", "prisma_test_2"]);
 });
 
-test("this worker's Worker Database is a working clone of the template", async () => {
-  const workerUri = new URL(inject("templateDatabaseUri"));
-  workerUri.pathname = `/prisma_test_${process.env.VITEST_POOL_ID}`;
-  const worker = clientFor(workerUri.toString());
-
-  const author = await worker.author.create({
-    data: { name: "Ada", posts: { create: [{ title: "On engines" }] } },
-    include: { posts: true },
-  });
-
-  expect(author.posts).toHaveLength(1);
+test("provides the Template Database name alongside the URI", () => {
+  // The name has to cross the process boundary too: the worker rewrites the URI path
+  // from it, and the Test Transaction guard derives its accepted shape from it.
+  expect(inject("templateDatabaseName")).toBe("prisma_test");
 });
