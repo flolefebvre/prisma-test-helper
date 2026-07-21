@@ -160,6 +160,21 @@ describe("createGlobalSetup", () => {
     );
   });
 
+  // The Template Database name has to cross the process boundary alongside the URI:
+  // the worker rewrites the URI path from it, and `installTestTransaction` derives the
+  // `<databaseName>_<pool id>` guard pattern from it.
+  test("provides the Template Database name to the run", async () => {
+    const { project } = await runSetup();
+
+    expect(project.provide).toHaveBeenCalledWith("templateDatabaseName", "prisma_test");
+  });
+
+  test("provides the configured Template Database name, not the default", async () => {
+    const { project } = await runSetup({ databaseName: "myapp_test" });
+
+    expect(project.provide).toHaveBeenCalledWith("templateDatabaseName", "myapp_test");
+  });
+
   test("teardown stops the container", async () => {
     const { teardown } = await runSetup();
     expect(postgres.started.stop).not.toHaveBeenCalled();
