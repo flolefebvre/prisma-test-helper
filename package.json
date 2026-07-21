@@ -24,6 +24,10 @@
   ],
   "sideEffects": false,
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./global-setup": {
       "types": "./dist/global-setup.d.ts",
       "default": "./dist/global-setup.js"
