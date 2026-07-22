@@ -23,7 +23,9 @@ back.
 
 ## Requirements
 
-- Node >= 20, ESM project
+- Node >= 20. The package ships ESM only, but your project need not be — the wiring runs
+  under Vitest, which transforms modules through Vite, so a CommonJS project (a stock
+  Next.js app, say) works too.
 - Docker (or another container runtime Testcontainers can reach)
 - Peer dependencies: `vitest` ^4 and `prisma` ^7, with your migrations committed
   (`prisma migrate deploy` is what the harness runs)
@@ -116,7 +118,8 @@ vi.mock("../src/db/client.js", async (importOriginal) => {
 
 The factory returns `{ db }` because the client module above exports only `db`. If yours
 exports anything else — types, a re-exported `Prisma` namespace, helpers — spread the
-original too, or those exports become `undefined` at every call site:
+original too, or every call site touching one of them fails with Vitest's
+`No "Prisma" export is defined on the "../src/db/client.js" mock`:
 
 ```ts
 return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
@@ -293,6 +296,25 @@ Every error below comes from this package. Find the one you got.
 | `no test transaction is installed —`                                    | Your client module was imported without going through the setup file's `vi.mock`. Check the mock path matches the import path your app uses.                                                                                                                                                                                                                                                                                                                                                                                           |
 | `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+## Agent skills
+
+If you use an AI coding agent (Claude Code, Cursor, Codex, …), this repo ships two installable skills that teach it this harness — split so you keep only what you still need:
+
+| Skill                                                                  | What it does                                                                                                                                                                                                                                                            | Keep it?          |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| [`prisma-test-helper-setup`](skills/prisma-test-helper-setup/SKILL.md) | Wires the harness into a project: installs the package, finds your Prisma client module, scaffolds the five files above (merging existing configs rather than clobbering them), pins the Postgres image from your `docker-compose.yml`, and verifies with a smoke test. | Remove once wired |
+| [`prisma-test-helper`](skills/prisma-test-helper/SKILL.md)             | The rules for writing tests in a wired project: the per-file `setupDatabase()` opt-in, where test data belongs, the Reset Hook seam, and every guard error above with its fix.                                                                                          | Keep installed    |
+
+```sh
+# wiring a project for the first time
+npx skills add flolefebvre/prisma-test-helper --skill prisma-test-helper-setup
+
+# writing tests in a project that is already wired
+npx skills add flolefebvre/prisma-test-helper --skill prisma-test-helper
+```
+
+(Uses the [skills CLI](https://github.com/vercel-labs/skills); or just copy the skill directory into your agent's skills directory, e.g. `.claude/skills/`.)
 
 ## License
 
