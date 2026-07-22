@@ -72,7 +72,7 @@ export function registerResetHook(hook: ResetHook): void {
  * `afterEach`, so they land past the rollback, where the database is out of reach.
  *
  * @example
- * import { setupDatabase } from "@flolefebvre/prisma-test-helper";
+ * import { setupDatabase } from "@flefebvre/prisma-test-helper";
  * import { db } from "../src/db/client.js";
  *
  * setupDatabase();

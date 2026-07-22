@@ -1,4 +1,4 @@
-# @flolefebvre/prisma-test-helper
+# @flefebvre/prisma-test-helper
 
 An isolated, fast Postgres test database for Prisma + Vitest projects: one throwaway
 container per test run, migrations applied once to a Template Database, one Worker
@@ -31,7 +31,7 @@ back.
 ## Install
 
 ```sh
-pnpm add -D @flolefebvre/prisma-test-helper
+pnpm add -D @flefebvre/prisma-test-helper
 # or: npm i -D / yarn add -D / bun add -d
 ```
 
@@ -92,7 +92,7 @@ fires loudly instead of silently pointing the suite at your dev database.
 
 ```ts
 // tests/global-setup.ts
-import { createGlobalSetup } from "@flolefebvre/prisma-test-helper/global-setup";
+import { createGlobalSetup } from "@flefebvre/prisma-test-helper/global-setup";
 
 export default createGlobalSetup();
 ```
@@ -103,8 +103,8 @@ export default createGlobalSetup();
 // tests/setup.ts
 import { vi } from "vitest";
 
-import { installTestTransaction } from "@flolefebvre/prisma-test-helper";
-import { setupWorkerDatabase } from "@flolefebvre/prisma-test-helper/setup";
+import { installTestTransaction } from "@flefebvre/prisma-test-helper";
+import { setupWorkerDatabase } from "@flefebvre/prisma-test-helper/setup";
 
 const { databaseUrl, databaseName } = setupWorkerDatabase();
 
@@ -157,7 +157,7 @@ re-instantiating per file.
 // tests/author.test.ts
 import { expect, test } from "vitest";
 
-import { setupDatabase } from "@flolefebvre/prisma-test-helper";
+import { setupDatabase } from "@flefebvre/prisma-test-helper";
 import { db } from "../src/db/client.js";
 
 setupDatabase();
@@ -245,7 +245,7 @@ seed.
 // tests/factories.ts
 import { faker } from "@faker-js/faker";
 
-import { registerResetHook } from "@flolefebvre/prisma-test-helper";
+import { registerResetHook } from "@flefebvre/prisma-test-helper";
 import { db } from "../src/db/client.js";
 
 registerResetHook(({ seed }) => {

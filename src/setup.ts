@@ -41,7 +41,7 @@ export function setupWorkerDatabase(): WorkerDatabase {
   const poolId = process.env.VITEST_POOL_ID;
   if (!poolId) {
     throw new Error(
-      "VITEST_POOL_ID is not set — @flolefebvre/prisma-test-helper could not tell which " +
+      "VITEST_POOL_ID is not set — @flefebvre/prisma-test-helper could not tell which " +
         "Worker Database belongs to this worker. `setupWorkerDatabase()` must run inside " +
         'a Vitest worker, from a file listed in `setupFiles`, with `pool: "forks"` set ' +
         "in your Vitest config.",
@@ -54,7 +54,7 @@ export function setupWorkerDatabase(): WorkerDatabase {
   const databaseName = inject("templateDatabaseName") as string | undefined;
   if (!templateUri || !databaseName) {
     throw new Error(
-      "No Template Database was provided to this run — @flolefebvre/prisma-test-helper's " +
+      "No Template Database was provided to this run — @flefebvre/prisma-test-helper's " +
         "global setup did not run. Add a global-setup file exporting " +
         "`createGlobalSetup()` and register it in your Vitest config as " +
         '`globalSetup: ["test/global-setup.ts"]`.',

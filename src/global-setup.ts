@@ -135,7 +135,7 @@ async function assertDockerReachable(): Promise<void> {
   } catch (cause) {
     throw new Error(
       "The test suite could not reach a container runtime. " +
-        "@flolefebvre/prisma-test-helper starts a Postgres container for the run, so " +
+        "@flefebvre/prisma-test-helper starts a Postgres container for the run, so " +
         "Docker must be running — start Docker and run the tests again.",
       { cause },
     );
@@ -180,7 +180,7 @@ function resolvePrismaBin(): string {
     throw new Error(
       "Could not resolve the `prisma` CLI from " +
         process.cwd() +
-        ". @flolefebvre/prisma-test-helper migrates the Template Database with your " +
+        ". @flefebvre/prisma-test-helper migrates the Template Database with your " +
         "project's own Prisma — install the `prisma` package (it is a peer " +
         "dependency) and run the tests again.",
       { cause },
