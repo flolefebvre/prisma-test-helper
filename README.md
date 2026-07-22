@@ -294,6 +294,25 @@ Every error below comes from this package. Find the one you got.
 | `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
+## Agent skills
+
+If you use an AI coding agent (Claude Code, Cursor, Codex, …), this repo ships two installable skills that teach it this harness — split so you keep only what you still need:
+
+| Skill                                                                  | What it does                                                                                                                                                                                                                                                            | Keep it?          |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| [`prisma-test-helper-setup`](skills/prisma-test-helper-setup/SKILL.md) | Wires the harness into a project: installs the package, finds your Prisma client module, scaffolds the five files above (merging existing configs rather than clobbering them), pins the Postgres image from your `docker-compose.yml`, and verifies with a smoke test. | Remove once wired |
+| [`prisma-test-helper`](skills/prisma-test-helper/SKILL.md)             | The rules for writing tests in a wired project: the per-file `setupDatabase()` opt-in, where test data belongs, the Reset Hook seam, and every guard error above with its fix.                                                                                          | Keep installed    |
+
+```sh
+# wiring a project for the first time
+npx skills add flolefebvre/prisma-test-helper --skill prisma-test-helper-setup
+
+# writing tests in a project that is already wired
+npx skills add flolefebvre/prisma-test-helper --skill prisma-test-helper
+```
+
+(Uses the [skills CLI](https://github.com/vercel-labs/skills); or just copy the skill directory into your agent's skills directory, e.g. `.claude/skills/`.)
+
 ## License
 
 MIT
