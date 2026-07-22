@@ -220,9 +220,9 @@ Opts a test file into the database. Wraps every test in its own transaction: a
 
 ### `isDatabaseSetUp(): boolean`
 
-Whether `setupDatabase()` has run in this file. Factories read it to fail loudly when a
-file forgot to opt in, rather than run outside any transaction — where their writes would
-commit.
+Whether `setupDatabase()` has run in this file. Useful in your own fixture helpers — read
+it to fail loudly when a file forgot to opt in, rather than let them run outside any
+transaction, where their writes would commit.
 
 ```ts
 if (!isDatabaseSetUp()) {
@@ -233,16 +233,18 @@ if (!isDatabaseSetUp()) {
 ### `registerResetHook(hook): void`
 
 Register a callback to run in every `beforeEach`, after the transaction opens. This is the
-seam factories plug into. Hooks receive `{ testName, seed }`, where `seed` is a
-deterministic 32-bit hash (FNV-1a) of the test name alone — never the worker id, the file,
-or the run order. Rerunning one test with `-t` therefore hands it the same seed a
-full-suite run did.
+seam for wiring your own fixture and test-data libraries into the per-test lifecycle —
+reseeding a random generator, resetting a counter, priming a fixture registry. Hooks
+receive `{ testName, seed }`, where `seed` is a deterministic 32-bit hash (FNV-1a) of the
+test name alone — never the worker id, the file, or the run order. Rerunning one test with
+`-t` therefore hands it the same seed a full-suite run did.
 
-Faker is deliberately **not** a dependency of this package; the harness only hands you the
-seed.
+No data-generation library is a dependency of this package; the harness only hands you the
+seed, and you decide what to do with it. Below, Faker — but anything that takes a numeric
+seed works the same way.
 
 ```ts
-// tests/factories.ts
+// tests/fixtures.ts
 import { faker } from "@faker-js/faker";
 
 import { registerResetHook } from "@flefebvre/prisma-test-helper";
@@ -252,7 +254,7 @@ registerResetHook(({ seed }) => {
   faker.seed(seed);
 });
 
-export function buildAuthor() {
+export function createAuthor() {
   return db.author.create({ data: { name: faker.person.fullName() } });
 }
 ```
