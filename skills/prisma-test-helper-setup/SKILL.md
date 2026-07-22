@@ -37,7 +37,7 @@ pnpm add -D @flefebvre/prisma-test-helper   # npm i -D / yarn add -D / bun add -
 
 ## 3. Locate the Prisma client module
 
-The harness assumes the app reaches the database through **one module it can intercept**. Find it: search for `new PrismaClient(` across the project's source. Record two things — the **module path** and the **export name** (commonly `db` or `prisma`) — and note whether the module exports anything besides the client; step 6 depends on it.
+The harness assumes the app reaches the database through **one module it can intercept**. Find it: search for `new PrismaClient(` across the project's source, **excluding `node_modules` and the schema's `generator client { output = … }` directory** — the generated client documents its own constructor in doc comments, so searching it yields a handful of matches that are all noise. Record two things — the **module path** and the **export name** (commonly `db` or `prisma`) — and note whether the module exports anything besides the client; step 6 depends on it.
 
 - **Exactly one match** → that is the module. Use it as-is; do not rewrite it.
 - **Several matches** → ask the user which one the app's code imports, rather than guessing.
@@ -128,7 +128,7 @@ vi.mock("../src/db/client.js", async (importOriginal) => {
 
 The mock path must match the specifier the app's own code imports, and the returned key must be the real export name.
 
-**The client module exports more than the client** — types, a re-exported `Prisma` namespace, helpers — → spread the original, or those exports become `undefined` at every call site:
+**The client module exports more than the client** — types, a re-exported `Prisma` namespace, helpers — → spread the original, or every call site touching one of them fails with `No "<name>" export is defined on the "<path>" mock`:
 
 ```ts
 return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };

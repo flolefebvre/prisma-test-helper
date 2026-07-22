@@ -92,7 +92,7 @@ The last three are wiring, already in place in a wired project — reach for the
 
 ### Two wiring traps worth knowing
 
-**The `vi.mock` factory drops every export it doesn't return.** If the client module exports anything beyond the client — types, a re-exported `Prisma` namespace, helpers — spread the original, or those exports are `undefined` at every call site:
+**The `vi.mock` factory drops every export it doesn't return.** If the client module exports anything beyond the client — types, a re-exported `Prisma` namespace, helpers — spread the original. Without it, every call site that touches one of those exports fails with Vitest's own `No "Prisma" export is defined on the "../src/db/client.js" mock. Did you forget to return it from "vi.mock"?` — the fix is the spread, in the setup file, not in the test that reported it:
 
 ```ts
 return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
