@@ -1,6 +1,6 @@
 ---
 name: prisma-test-helper
-description: Write Vitest tests against a real Postgres database with @flefebvre/prisma-test-helper. Use when adding or editing a test that touches the database in a project depending on @flefebvre/prisma-test-helper; when a test fails with one of its guard errors ("no test transaction is installed", "the database was touched with no test transaction live", "refusing to open a test transaction on …"); when writing fixture or test-data helpers that plug into its per-test lifecycle; or when the user mentions prisma-test-helper.
+description: Write Vitest tests against a real Postgres database with @flefebvre/prisma-test-helper. Use when adding or editing a test that touches the database in a project depending on @flefebvre/prisma-test-helper; when a test fails with one of its guard errors ("no test transaction is installed", "the database was touched with no test transaction live", "refusing to open a test transaction on …"); when writing fixture or test-data helpers that plug into its per-test lifecycle; or when the user mentions prisma-test-helper in a project that already depends on it.
 ---
 
 # prisma-test-helper
@@ -27,11 +27,11 @@ test("persists an author", async () => {
 });
 ```
 
-The rollback is the cleanup. The Worker Database never changes, so every test starts from the same pristine clone — no truncation, no ordering constraints, no leftover rows. Files that never call `setupDatabase()` are untouched by the harness.
+The rollback is the cleanup. The Worker Database never changes, so every test starts from the same pristine clone — no truncation, no ordering constraints, no leftover rows. Files that never call `setupDatabase()` register no hooks and are free to skip the database entirely.
 
 ## Iron rules
 
-1. **Call `setupDatabase()` once, at the top of every database-touching file.** It is the opt-in — a file without it runs outside any transaction, where writes commit. A _second_ call in the same file throws `a test transaction is already live`, an error that never names the duplicate call, so check for an existing one before adding yours.
+1. **Call `setupDatabase()` once, at the top of every database-touching file.** It is the opt-in. A file that touches the client without it fails on the first query with `the database was touched with no test transaction live` — the harness refuses rather than letting the write commit, so a forgotten opt-in is a loud failure, never silent pollution. A _second_ call in the same file throws `a test transaction is already live`, an error that never names the duplicate call, so check for an existing one before adding yours.
 
 2. **Build test data inside tests.** `beforeAll` runs before any transaction is open, so writes there would commit to the Worker Database and leak into every later test. The harness throws rather than let that happen. `beforeEach` is fine — it runs inside the transaction.
 
@@ -88,7 +88,7 @@ if (!isDatabaseSetUp()) {
 | `installTestTransaction(client, databaseUrl, databaseName)` | the `vi.mock` factory          | Wraps the real client in the **Routing Proxy**, under the same type.                                                |
 | `createGlobalSetup(options?)`                               | the global-setup file          | `image` (default `postgres:17-alpine`), `databaseName` (default `prisma_test`).                                     |
 
-The last three are wiring, already in place in a wired project — reach for them only when changing the wiring itself.
+The first three import from `@flefebvre/prisma-test-helper`. The last three are wiring, already in place in a wired project — reach for them only when changing the wiring itself, and mind their subpaths: `setupWorkerDatabase` comes from `@flefebvre/prisma-test-helper/setup` and `createGlobalSetup` from `@flefebvre/prisma-test-helper/global-setup`; neither is on the package root.
 
 ### Two wiring traps worth knowing
 

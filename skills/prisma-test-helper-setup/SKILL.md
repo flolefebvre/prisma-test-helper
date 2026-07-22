@@ -95,7 +95,7 @@ import { createGlobalSetup } from "@flefebvre/prisma-test-helper/global-setup";
 export default createGlobalSetup();
 ```
 
-**Pin the Postgres image to production's major.** Read `docker-compose.yml` (also `compose.yml`, `docker-compose.yaml`) and look for a Postgres service's `image:`. Found one → pass it through, so tests never run against a different Postgres than the project deploys on:
+**Pin the Postgres image to production's major.** Read `docker-compose.yml` (also `compose.yaml`, `compose.yml`, `docker-compose.yaml`) and look for a Postgres service's `image:`. Found one → pass it through, so tests never run against a different Postgres than the project deploys on:
 
 ```ts
 export default createGlobalSetup({ image: "postgres:16-alpine" });
@@ -164,7 +164,7 @@ export default defineConfig({
 
 ## 8. Prove it works
 
-Write a smoke test against a real model from the project's schema — two tests, in this order, so the second proves the first was rolled back:
+Write a smoke test against a real model from the project's schema, importing the client from the module path and export name found in step 3 — two tests, in this order, so the second proves the first was rolled back:
 
 ```ts
 // tests/smoke.test.ts

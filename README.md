@@ -116,7 +116,8 @@ vi.mock("../src/db/client.js", async (importOriginal) => {
 
 The factory returns `{ db }` because the client module above exports only `db`. If yours
 exports anything else — types, a re-exported `Prisma` namespace, helpers — spread the
-original too, or those exports become `undefined` at every call site:
+original too, or every call site touching one of them fails with Vitest's
+`No "Prisma" export is defined on the "../src/db/client.js" mock`:
 
 ```ts
 return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
