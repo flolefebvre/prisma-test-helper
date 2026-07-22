@@ -37,10 +37,32 @@ pnpm add -D @flolefebvre/prisma-test-helper
 
 ## Wiring
 
-Four files. The blocks below are the wiring this repo's own test suite runs — see
-`tests/global-setup.ts`, `tests/setup.ts`, `tests/db/client.ts`, and `vitest.config.ts`.
+Five files. The blocks below are the wiring this repo's own test suite runs — see
+`prisma.config.ts`, `tests/global-setup.ts`, `tests/setup.ts`, `tests/db/client.ts`, and
+`vitest.config.ts`.
 
-### 1. Your Prisma client module
+### 1. Prisma config
+
+Prisma 7 reads the datasource URL from `prisma.config.ts`, not from the schema — and
+`prisma migrate deploy` **fails without it**. The harness runs your project's own
+`migrate deploy` with `DATABASE_URL` pointed at the throwaway container, so read it from
+the environment here. The placeholder keeps database-free commands (`prisma generate`)
+working.
+
+```ts
+// prisma.config.ts
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: { path: "prisma/migrations" },
+  datasource: {
+    url: process.env.DATABASE_URL ?? "postgresql://unset:unset@localhost:5432/unset",
+  },
+});
+```
+
+### 2. Your Prisma client module
 
 The harness assumes your app reaches the database through a single module it can
 intercept. If you already have one, use it as-is.
@@ -60,10 +82,10 @@ export const db = new PrismaClient({ adapter: new PrismaPg({ connectionString })
 ```
 
 Throwing when `DATABASE_URL` is unset is worth keeping. It is the tripwire for the
-ordering rule in step 2: if the setup file ever imports your app statically, this throw
+ordering rule in step 4: if the setup file ever imports your app statically, this throw
 fires loudly instead of silently pointing the suite at your dev database.
 
-### 2. Global setup
+### 3. Global setup
 
 ```ts
 // tests/global-setup.ts
@@ -72,7 +94,7 @@ import { createGlobalSetup } from "@flolefebvre/prisma-test-helper/global-setup"
 export default createGlobalSetup();
 ```
 
-### 3. Per-worker setup
+### 4. Per-worker setup
 
 ```ts
 // tests/setup.ts
@@ -96,7 +118,7 @@ vi.mock("../src/db/client.js", async (importOriginal) => {
 > (as above) or a dynamic `import()`. Library imports are safe: they read no environment
 > at import time.
 
-### 4. Vitest config
+### 5. Vitest config
 
 ```ts
 // vitest.config.ts
@@ -246,18 +268,18 @@ every later test. The harness throws rather than let that happen.
 
 Every error below comes from this package. Find the one you got.
 
-| Error                                                                   | What is mis-wired                                                                                                                                       |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `The test suite could not reach a container runtime.`                   | Docker is not running. Start it and run the tests again.                                                                                                |
-| ``Could not resolve the `prisma` CLI from <cwd>.``                      | The `prisma` peer dependency is not installed. The harness migrates with your project's own Prisma.                                                     |
-| `` `prisma migrate deploy` failed: ``                                   | Your migrations failed to apply. The Postgres output follows the message.                                                                               |
-| `cloning the Worker Databases from <name> failed:`                      | `CREATE DATABASE … TEMPLATE` failed — usually another connection to the template, or a Postgres image that does not support the clone.                  |
-| `VITEST_POOL_ID is not set —`                                           | `setupWorkerDatabase()` ran outside a Vitest worker. It must run from a file listed in `setupFiles`, with `pool: "forks"` set.                          |
-| `No Template Database was provided to this run —`                       | The global setup did not run. Register your global-setup file as `globalSetup: ["tests/global-setup.ts"]`.                                              |
-| `refusing to open a test transaction on <name> — only Worker Databases` | The `databaseName` passed to `installTestTransaction` does not match the one `createGlobalSetup` used. Pass the value `setupWorkerDatabase()` returned. |
-| `no test transaction is installed —`                                    | Your client module was imported without going through the setup file's `vi.mock`. Check the mock path matches the import path your app uses.            |
-| `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                         |
-| `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                     |
+| Error                                                                   | What is mis-wired                                                                                                                                                                                   |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `The test suite could not reach a container runtime.`                   | Docker is not running. Start it and run the tests again.                                                                                                                                            |
+| ``Could not resolve the `prisma` CLI from <cwd>.``                      | The `prisma` peer dependency is not installed. The harness migrates with your project's own Prisma.                                                                                                 |
+| `` `prisma migrate deploy` failed: ``                                   | Your migrations failed to apply; Prisma's own output follows. If it reads `The datasource.url property is required in your Prisma config file`, you are missing the `prisma.config.ts` from step 1. |
+| `cloning the Worker Databases from <name> failed:`                      | `CREATE DATABASE … TEMPLATE` failed — usually another connection to the template, or a Postgres image that does not support the clone.                                                              |
+| `VITEST_POOL_ID is not set —`                                           | `setupWorkerDatabase()` ran outside a Vitest worker. It must run from a file listed in `setupFiles`, with `pool: "forks"` set.                                                                      |
+| `No Template Database was provided to this run —`                       | The global setup did not run. Register your global-setup file as `globalSetup: ["tests/global-setup.ts"]`.                                                                                          |
+| `refusing to open a test transaction on <name> — only Worker Databases` | The `databaseName` passed to `installTestTransaction` does not match the one `createGlobalSetup` used. Pass the value `setupWorkerDatabase()` returned.                                             |
+| `no test transaction is installed —`                                    | Your client module was imported without going through the setup file's `vi.mock`. Check the mock path matches the import path your app uses.                                                        |
+| `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                                                                     |
+| `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                                                                 |
 
 ## License
 
