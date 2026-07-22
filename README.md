@@ -23,7 +23,9 @@ back.
 
 ## Requirements
 
-- Node >= 20, ESM project
+- Node >= 20. The package ships ESM only, but your project need not be — the wiring runs
+  under Vitest, which transforms modules through Vite, so a CommonJS project (a stock
+  Next.js app, say) works too.
 - Docker (or another container runtime Testcontainers can reach)
 - Peer dependencies: `vitest` ^4 and `prisma` ^7, with your migrations committed
   (`prisma migrate deploy` is what the harness runs)

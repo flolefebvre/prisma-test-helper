@@ -29,6 +29,8 @@ test("persists an author", async () => {
 
 The rollback is the cleanup. The Worker Database never changes, so every test starts from the same pristine clone — no truncation, no ordering constraints, no leftover rows. Files that never call `setupDatabase()` register no hooks and are free to skip the database entirely.
 
+Import the client the way the rest of the project does — the relative `.js` specifier above suits an ESM project, while a Next.js or Vite app typically writes an alias (`import { db } from "@/lib/db"`). The alias must also be what the setup file's `vi.mock` names.
+
 ## Iron rules
 
 1. **Call `setupDatabase()` once, at the top of every database-touching file.** It is the opt-in. A file that touches the client without it fails on the first query with `the database was touched with no test transaction live` — the harness refuses rather than letting the write commit, so a forgotten opt-in is a loud failure, never silent pollution. A _second_ call in the same file throws `a test transaction is already live`, an error that never names the duplicate call, so check for an existing one before adding yours.

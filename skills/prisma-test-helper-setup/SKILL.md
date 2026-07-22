@@ -17,11 +17,12 @@ Work the steps in order. Each one lands before the next starts.
 
 Read `package.json` and confirm every requirement, reporting any that fail before touching a file:
 
-- `"type": "module"` — the harness is ESM-only.
 - `prisma` and `@prisma/client` at **^7**, `vitest` at **^4**. On older majors, stop and tell the user which to upgrade; do not attempt the wiring.
 - Node >= 20 (`engines`, `.nvmrc`, or `node -v`).
 - Committed migrations under the schema's migrations directory — `prisma migrate deploy` is what the harness runs, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. If it is not, the wiring can still be scaffolded, but say plainly that step 8's verification cannot run until Docker is started.
+
+**A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the wiring runs under Vitest, which transforms modules through Vite rather than leaving them to Node's `require`. A CommonJS project — a stock Next.js app, for instance — wires up and passes. Note the project's module system and carry on; it decides the import style in steps 3 and 6, nothing more.
 
 **Done when:** every requirement is confirmed, or the blocking ones are reported and the run has stopped.
 
@@ -58,6 +59,8 @@ The harness assumes the app reaches the database through **one module it can int
   ```
 
   This needs `@prisma/adapter-pg` as a dependency — install it if it is missing.
+
+  **Match the project's import style rather than copying this block's.** The `.js`-suffixed relative specifier above suits an ESM project on `moduleResolution: "nodenext"`. A project on `"bundler"` resolution — Next.js, most Vite apps — writes extensionless imports and usually a path alias instead: `import { PrismaClient } from "@/generated/prisma/client"`. Read `tsconfig.json`'s `moduleResolution` and `paths`, and follow what the project's existing source already does.
 
 Throwing when `DATABASE_URL` is unset is worth keeping in an existing module too, and worth adding if the user agrees. It is the tripwire for step 6's ordering rule: if the setup file ever imports the app statically, this throw fires loudly instead of silently pointing the suite at the dev database.
 
@@ -128,6 +131,17 @@ vi.mock("../src/db/client.js", async (importOriginal) => {
 
 The mock path must match the specifier the app's own code imports, and the returned key must be the real export name.
 
+**The app imports through a path alias** — `import { db } from "@/lib/db"`, standard in Next.js — → mock the alias, not a relative path, because the alias is the specifier every call site uses:
+
+```ts
+vi.mock("@/lib/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/db")>();
+  return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
+});
+```
+
+Vitest does not read `tsconfig.json`'s `paths` on its own, so this fails with `Cannot find package '@/lib/db'` until step 7 turns alias resolution on.
+
 **The client module exports more than the client** — types, a re-exported `Prisma` namespace, helpers — → spread the original, or every call site touching one of them fails with `No "<name>" export is defined on the "<path>" mock`:
 
 ```ts
@@ -160,7 +174,33 @@ export default defineConfig({
 
 `pool: "forks"` and `isolate: true` are load-bearing. If the existing config sets `pool: "threads"` or `isolate: false`, correct them and tell the user why: under `isolate: false` module state leaks across files, and the `setupDatabase()` opt-in guard relies on its module re-instantiating per file.
 
-**Done when:** a single Vitest config carries all four settings alongside its original contents, and the paths match the files from steps 5 and 6.
+**The project uses path aliases** (`tsconfig.json` has `compilerOptions.paths`) → turn on alias resolution, or every aliased import in the setup file and the tests fails to resolve:
+
+```ts
+export default defineConfig({
+  resolve: { tsconfigPaths: true },
+  test: {/* … */},
+});
+```
+
+Vite resolves `paths` natively — reach for the `vite-tsconfig-paths` plugin only on a Vite version too old to support the option.
+
+**The client module imports `server-only`** (common in Next.js) → alias it to the empty build the package ships for non-render environments, or mocking the module fails with the misleading `This module cannot be imported from a Client Component module`:
+
+```ts
+import { fileURLToPath } from "node:url";
+
+resolve: {
+  tsconfigPaths: true,
+  alias: {
+    "server-only": fileURLToPath(new URL("./node_modules/server-only/empty.js", import.meta.url)),
+  },
+},
+```
+
+The path is deliberate: `server-only` exposes only `.` in its `exports` map, so the subpath specifier `server-only/empty.js` will not resolve.
+
+**Done when:** a single Vitest config carries all four settings alongside its original contents, the paths match the files from steps 5 and 6, and aliased imports resolve.
 
 ## 8. Prove it works
 
