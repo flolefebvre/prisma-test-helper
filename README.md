@@ -1,19 +1,43 @@
 # @flefebvre/prisma-test-helper
 
-An isolated, fast Postgres test database for Prisma + Vitest projects: one throwaway
-container per test run, migrations applied once to a Template Database, one Worker
-Database cloned per Vitest worker, and every test wrapped in a transaction that is rolled
-back.
+Fast, isolated Postgres for Prisma + Vitest tests: a real database per worker, a
+rolled-back transaction per test, zero cleanup code.
 
-**Postgres-only.** The harness starts a real Postgres in Docker and relies on
-`CREATE DATABASE … TEMPLATE` for cloning; no other database is supported. Tested against
-**Prisma 7** and **Vitest 4** on **Node >= 20**.
+[![npm version](https://img.shields.io/npm/v/%40flefebvre%2Fprisma-test-helper)](https://www.npmjs.com/package/@flefebvre/prisma-test-helper)
+[![CI](https://github.com/flolefebvre/prisma-test-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/flolefebvre/prisma-test-helper/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## What you get
+## Why
 
-- **No cleanup code.** Each test runs inside a transaction that is rolled back when it
-  ends. The Worker Database never changes, so every test starts from the same pristine
-  clone — no truncation, no ordering constraints, no leftover rows.
+Testing against a real database usually forces a trade-off. Either you serialize your
+suite and truncate tables between tests — slow, and one forgotten cleanup poisons every
+test after it — or you swap the database for SQLite or a mock, and stop testing your
+actual migrations, constraints, and queries.
+
+This harness removes the trade-off. Each test run gets one throwaway Postgres container;
+each Vitest worker gets its own database; each test runs inside a transaction that is
+rolled back when it ends. Your tests look like this:
+
+```ts
+import { expect, test } from "vitest";
+
+import { setupDatabase } from "@flefebvre/prisma-test-helper";
+import { db } from "../src/db/client.js";
+
+setupDatabase();
+
+test("persists an author", async () => {
+  await db.author.create({ data: { name: "Ada" } });
+  expect(await db.author.count()).toBe(1);
+});
+
+test("starts from a clean database — the author above is gone", async () => {
+  expect(await db.author.count()).toBe(0);
+});
+```
+
+- **No cleanup code.** Every test starts from the same pristine database — no truncation,
+  no ordering constraints, no leftover rows.
 - **Real Postgres.** Not SQLite, not a mock. Your migrations, your constraints, your
   triggers, your `citext` columns.
 - **Parallel by default.** One database per Vitest worker slot, so files running in
@@ -21,27 +45,49 @@ back.
 - **Nothing to tear down.** The container is removed when the run ends, including after a
   crash.
 
+**Postgres-only.** The harness starts a real Postgres in Docker and relies on
+`CREATE DATABASE … TEMPLATE` for cloning; no other database is supported.
+
+## How it works
+
+One run of your test suite goes through this lifecycle:
+
+1. Vitest's global setup starts one tuned throwaway Postgres container (tmpfs data
+   directory, `fsync=off`) through [Testcontainers](https://testcontainers.com/).
+2. Your project's own `prisma migrate deploy` runs once against a **Template Database**
+   inside that container.
+3. Before any worker forks, one **Worker Database** per Vitest worker slot is cloned from
+   the template (`<databaseName>_1..N`) with `CREATE DATABASE … TEMPLATE` — a fast
+   file-level copy.
+4. Each worker points `DATABASE_URL` at its own clone and wraps your Prisma client in a
+   routing proxy. Each test opens a transaction, runs inside it, and rolls it back.
+5. The container is removed when the run ends.
+
+Migrations run once, clones are cheap, and rollback is instant — so the per-test overhead
+is a `BEGIN`/`ROLLBACK` pair, not a container or a truncation pass.
+
 ## Requirements
 
-- Node >= 20. The package ships ESM only, but your project need not be — the wiring runs
-  under Vitest, which transforms modules through Vite, so a CommonJS project (a stock
-  Next.js app, say) works too.
-- Docker (or another container runtime Testcontainers can reach)
-- Peer dependencies: `vitest` ^4 and `prisma` ^7, with your migrations committed
-  (`prisma migrate deploy` is what the harness runs)
+- **Node >= 20.** The package ships ESM only, but your project need not be — the wiring
+  runs under Vitest, which transforms modules through Vite, so a CommonJS project (a
+  stock Next.js app, say) works too.
+- **Docker** (or another container runtime Testcontainers can reach).
+- Peer dependencies: **Vitest ^4** and **Prisma ^7**, with your migrations committed
+  (`prisma migrate deploy` is what the harness runs).
 
-## Install
+## Installation
 
 ```sh
 pnpm add -D @flefebvre/prisma-test-helper
 # or: npm i -D / yarn add -D / bun add -d
 ```
 
-## Wiring
+## Setup
 
 Five files. The blocks below are the wiring this repo's own test suite runs — see
 `prisma.config.ts`, `tests/global-setup.ts`, `tests/setup.ts`, `tests/db/client.ts`, and
-`vitest.config.ts`.
+`vitest.config.ts`. If you use an AI coding agent, the
+[`prisma-test-helper-setup` skill](#ai-agent-skills) can do all of this for you.
 
 ### 1. Prisma config
 
@@ -154,7 +200,10 @@ export default defineConfig({
 leaks across files, and the `setupDatabase()` opt-in guard relies on its module
 re-instantiating per file.
 
-### Writing a test
+## Writing tests
+
+`setupDatabase()` is the opt-in: call it once, at the top of any file that touches the
+database. Files that never call it are untouched by the harness.
 
 ```ts
 // tests/author.test.ts
@@ -171,20 +220,51 @@ test("persists an author", async () => {
 });
 ```
 
-`setupDatabase()` is the opt-in: call it once, at the top of any file that touches the
-database. Files that never call it are untouched by the harness.
+Three rules keep the isolation guarantees intact:
 
-## What happens per run
+- **Build test data inside tests, not in `beforeAll`.** `beforeAll` runs before any
+  transaction is open, so writes there would commit to the Worker Database and leak into
+  every later test. The harness throws rather than let that happen.
+- **Per-test cleanup belongs in `afterEach`, registered after `setupDatabase()`.** Vitest
+  runs `afterEach` hooks in reverse registration order, so one your file registers
+  _after_ that call still runs while the transaction is live. Cleanup registered with
+  `onTestFinished` does **not**: the runner fires those after every `afterEach`, so they
+  land past the rollback, where the database is out of reach.
+- **Call `setupDatabase()` once per file.** A second call in the same file fails with
+  `a test transaction is already live`, which does not point at the duplicate call.
 
-One tuned throwaway Postgres container starts (tmpfs data directory, `fsync=off`). Your
-project's `prisma migrate deploy` runs once against the **Template Database**. One
-**Worker Database** is cloned per Vitest worker slot (`<databaseName>_1..N`) before any
-worker forks. Each worker points `DATABASE_URL` at its own clone. Each test opens a
-transaction and rolls it back. The container is removed when the run ends.
+### Fixtures and seeded fake data
+
+`registerResetHook` is the seam for wiring your own fixture and test-data libraries into
+the per-test lifecycle. Hooks run in every `beforeEach` after the transaction opens, and
+receive `{ testName, seed }` — `seed` is a deterministic 32-bit hash of the test name
+alone, so rerunning one test with `-t` hands it the same seed a full-suite run did.
+
+No data-generation library is a dependency of this package; the harness only hands you
+the seed. Below, Faker — but anything that takes a numeric seed works the same way.
+
+```ts
+// tests/fixtures.ts
+import { faker } from "@faker-js/faker";
+
+import { registerResetHook } from "@flefebvre/prisma-test-helper";
+import { db } from "../src/db/client.js";
+
+registerResetHook(({ seed }) => {
+  faker.seed(seed);
+});
+
+export function createAuthor() {
+  return db.author.create({ data: { name: faker.person.fullName() } });
+}
+```
 
 ## API
 
 ### `createGlobalSetup(options?)`
+
+Creates the Vitest global setup that owns the container and Template Database. Exported
+from `@flefebvre/prisma-test-helper/global-setup`.
 
 | Option         | Default              | What it does                                                                                                                                       |
 | -------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -208,7 +288,8 @@ file carries the module augmentation that declares these keys. If it sits outsid
 Points this worker at its own Worker Database. Call it at the top of your setup file,
 above the `vi.mock`. It reads what `createGlobalSetup` provided, rewrites the URI onto
 this worker's clone, sets `process.env.DATABASE_URL`, and returns both halves —
-`installTestTransaction` needs both.
+`installTestTransaction` needs both. Exported from
+`@flefebvre/prisma-test-helper/setup`.
 
 ### `installTestTransaction(client, databaseUrl, databaseName): client`
 
@@ -235,52 +316,12 @@ if (!isDatabaseSetUp()) {
 
 ### `registerResetHook(hook): void`
 
-Register a callback to run in every `beforeEach`, after the transaction opens. This is the
-seam for wiring your own fixture and test-data libraries into the per-test lifecycle —
-reseeding a random generator, resetting a counter, priming a fixture registry. Hooks
-receive `{ testName, seed }`, where `seed` is a deterministic 32-bit hash (FNV-1a) of the
-test name alone — never the worker id, the file, or the run order. Rerunning one test with
-`-t` therefore hands it the same seed a full-suite run did.
+Register a callback to run in every `beforeEach`, after the transaction opens (see
+[Fixtures and seeded fake data](#fixtures-and-seeded-fake-data)). Hooks are held in a
+`Set`, so registering the same function twice runs it once. They run sequentially, in
+registration order, and are awaited.
 
-No data-generation library is a dependency of this package; the harness only hands you the
-seed, and you decide what to do with it. Below, Faker — but anything that takes a numeric
-seed works the same way.
-
-```ts
-// tests/fixtures.ts
-import { faker } from "@faker-js/faker";
-
-import { registerResetHook } from "@flefebvre/prisma-test-helper";
-import { db } from "../src/db/client.js";
-
-registerResetHook(({ seed }) => {
-  faker.seed(seed);
-});
-
-export function createAuthor() {
-  return db.author.create({ data: { name: faker.person.fullName() } });
-}
-```
-
-Hooks are held in a `Set`, so registering the same function twice runs it once. They run
-sequentially, in registration order, and are awaited.
-
-## Rules and caveats
-
-**Per-test cleanup belongs in `afterEach`, registered after `setupDatabase()`.** Vitest
-runs `afterEach` hooks in reverse registration order, so one your file registers _after_
-that call still runs while the transaction is live. Cleanup registered with
-`onTestFinished` does **not**: the runner fires those after every `afterEach`, so they land
-past the rollback, where the database is out of reach.
-
-**Call `setupDatabase()` once per file.** A second call in the same file fails with
-`a test transaction is already live`, which does not point at the duplicate call.
-
-**Build test data inside tests, not in `beforeAll`.** `beforeAll` runs before any
-transaction is open, so writes there would commit to the Worker Database and leak into
-every later test. The harness throws rather than let that happen.
-
-## When something is mis-wired
+## Troubleshooting
 
 Every error below comes from this package. Find the one you got.
 
@@ -297,7 +338,7 @@ Every error below comes from this package. Find the one you got.
 | `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
-## Agent skills
+## AI agent skills
 
 If you use an AI coding agent (Claude Code, Cursor, Codex, …), this repo ships two installable skills that teach it this harness — split so you keep only what you still need:
 
@@ -316,6 +357,21 @@ npx skills add flolefebvre/prisma-test-helper --skill prisma-test-helper
 
 (Uses the [skills CLI](https://github.com/vercel-labs/skills); or just copy the skill directory into your agent's skills directory, e.g. `.claude/skills/`.)
 
+## Contributing
+
+Issues and pull requests are welcome —
+[open one here](https://github.com/flolefebvre/prisma-test-helper/issues). The package is
+dogfooded: this repo's own test suite runs through the exact wiring documented above.
+
+```sh
+git clone https://github.com/flolefebvre/prisma-test-helper.git
+cd prisma-test-helper
+pnpm install
+pnpm run generate      # generate the fixture Prisma client
+pnpm test              # unit + integration (integration needs Docker)
+pnpm run gate          # everything CI runs: typecheck, lint, duplication, tests, build
+```
+
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).
