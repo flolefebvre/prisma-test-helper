@@ -1,0 +1,30 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/flolefebvre/prisma-test-helper",
+  "public_key": "pk_4Czm4B19o3pEf9xBjNGnP",
+  "projectTitle": "@flefebvre/prisma-test-helper",
+  "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per Vitest worker, one rolled-back transaction per test. Postgres-only.",
+  "branch": "main",
+  "folders": [],
+  "excludeFolders": [
+    ".github",
+    "docs/adr",
+    "docs/agents",
+    "node_modules",
+    "dist",
+    "prisma",
+    "src",
+    "tests"
+  ],
+  "excludeFiles": ["AGENTS.md", "CLAUDE.md"],
+  "rules": [
+    "Postgres only. The harness starts a real Postgres in Docker and clones databases with CREATE DATABASE ... TEMPLATE; SQLite, MySQL and mocks are not supported.",
+    "Call setupDatabase() once at the top level of a test file, outside any test or describe block. Files that never call it register no hooks and skip the database entirely.",
+    "Never write cleanup code. Each test runs in a Test Transaction that is rolled back when it ends, so truncation, delete-all hooks and ordering workarounds are unnecessary and wrong.",
+    "Import the public API from \"@flefebvre/prisma-test-helper\"; the Vitest wiring entry points are the \"@flefebvre/prisma-test-helper/global-setup\" and \"@flefebvre/prisma-test-helper/setup\" subpaths.",
+    "Consumer code must reach the database through its own Prisma client module, swapped for the Routing Proxy in the Client Seam (a vi.mock block in the consumer's Vitest setup file) via installTestTransaction.",
+    "Test data factories live in the consumer project, not in the harness. They plug in through the Reset Hook, which receives { testName, seed } for deterministic seeding.",
+    "Docker must be available at test time; Testcontainers starts and removes the container automatically, including after a crash."
+  ],
+  "previousVersions": [{ "tag": "v0.1.0" }]
+}
