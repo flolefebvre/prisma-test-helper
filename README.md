@@ -233,6 +233,15 @@ Three rules keep the isolation guarantees intact:
 - **Call `setupDatabase()` once per file.** A second call in the same file fails with
   `a test transaction is already live`, which does not point at the duplicate call.
 
+App code that opens its own `$transaction` — nested, batched, or fired concurrently with
+`Promise.all` — works under the harness: each call becomes a savepoint inside the test's
+transaction. One semantic difference from production: all of a test's queries share one
+connection, so `$transaction` calls that would run in parallel on separate connections
+run one after another instead. Independent transactions end with the same results;
+shapes that need true parallelism — a transaction that awaits a concurrent sibling's
+outcome mid-flight, or contention that separate connections would resolve — behave
+differently.
+
 ### Fixtures and seeded fake data
 
 `registerResetHook` is the seam for wiring your own fixture and test-data libraries into

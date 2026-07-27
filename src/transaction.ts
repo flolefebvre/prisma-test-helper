@@ -94,6 +94,10 @@ class Rollback extends Error {}
 // connection-level and pass through to the underlying client.
 const RAW_METHODS = new Set(["$queryRaw", "$queryRawUnsafe", "$executeRaw", "$executeRawUnsafe"]);
 
+// One savepoint scope's turn-taking state: the scope's direct children chain onto
+// `tail`, one at a time.
+type ScopeQueue = { tail: Promise<void> };
+
 /**
  * One test's database transaction. `start()` opens an interactive transaction and parks
  * it; `client` is a stand-in for the app's Prisma client that routes every query into
@@ -113,11 +117,15 @@ export class TestTransaction<Client extends MinimalClient> {
   private running: Promise<unknown> | null = null;
   private savepointSeq = 0;
   // Serializes savepoint scopes: they share one connection and Postgres savepoints are
-  // stack-like, so two interleaved scopes would corrupt each other's rollback.
-  private mutex: Promise<void> = Promise.resolve();
-  // Marks "inside a savepoint scope" across awaits, so a $transaction nested within
-  // another joins the outer scope's turn instead of deadlocking on the mutex.
-  private readonly inSavepoint = new AsyncLocalStorage<true>();
+  // stack-like, so two interleaved scopes would corrupt each other's rollback —
+  // releasing an earlier savepoint destroys every one established after it. Every scope
+  // owns a queue its direct children take turns on; top-level scopes take turns on this
+  // root queue. A scope waits only on its elder siblings, never on the turn its own
+  // parent holds, so nesting cannot deadlock while concurrent siblings serialize.
+  private rootScope: ScopeQueue = { tail: Promise.resolve() };
+  // The queue owned by the savepoint scope running on the current async path, inherited
+  // across awaits so a $transaction nested within another queues on its parent.
+  private readonly scopeQueue = new AsyncLocalStorage<ScopeQueue>();
 
   constructor(
     private readonly prisma: Client,
@@ -185,7 +193,7 @@ export class TestTransaction<Client extends MinimalClient> {
     this.release = null;
     this.running = null;
     this.savepointSeq = 0;
-    this.mutex = Promise.resolve();
+    this.rootScope = { tail: Promise.resolve() };
   }
 
   private proxy: Client | null = null;
@@ -249,14 +257,17 @@ export class TestTransaction<Client extends MinimalClient> {
 
   /**
    * Run `op` inside its own savepoint on the live transaction: released on success,
-   * rolled back — restoring a healthy transaction — when `op` throws. Scopes queue on
-   * the mutex; a scope opened from *inside* another (nested `$transaction`) joins the
-   * outer scope's turn, since Postgres savepoints nest natively.
+   * rolled back — restoring a healthy transaction — when `op` throws. A scope takes a
+   * turn on its parent's queue — the root queue when opened outside any scope — so
+   * concurrent siblings serialize instead of interleaving savepoints on the shared
+   * connection, while a scope nested sequentially starts at once: its parent's queue
+   * is empty, and it never waits on the turn its own parent holds.
    */
-  private async withSavepoint<T>(op: () => Promise<T>): Promise<T> {
-    if (this.inSavepoint.getStore()) return this.savepointScope(op);
-    const run = this.mutex.then(() => this.inSavepoint.run(true, () => this.savepointScope(op)));
-    this.mutex = run.then(
+  private withSavepoint<T>(op: () => Promise<T>): Promise<T> {
+    const parent = this.scopeQueue.getStore() ?? this.rootScope;
+    const scope: ScopeQueue = { tail: Promise.resolve() };
+    const run = parent.tail.then(() => this.scopeQueue.run(scope, () => this.savepointScope(op)));
+    parent.tail = run.then(
       () => undefined,
       () => undefined,
     );
@@ -269,12 +280,31 @@ export class TestTransaction<Client extends MinimalClient> {
     await tx.$executeRawUnsafe(`SAVEPOINT ${name}`);
     try {
       const result = await op();
+      await this.drainChildren();
       await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${name}`);
       return result;
     } catch (error) {
+      await this.drainChildren();
       await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${name}`);
       throw error;
     }
+  }
+
+  // A scope's `op` can settle while children are still queued — `Promise.all` rejects
+  // on the first sibling failure, leaving later siblings waiting for their turn. They
+  // must finish inside this scope's savepoint before it releases or rolls back, or
+  // their savepoints would interleave with its exit. Runs inside the scope's own
+  // `scopeQueue.run`, so the store is this scope's queue; the loop re-checks because a
+  // draining child can enqueue children of its own. Waiting on children cannot
+  // deadlock: a child never waits on the turn its parent holds.
+  private async drainChildren(): Promise<void> {
+    const scope = this.scopeQueue.getStore();
+    if (!scope) return;
+    let tail: Promise<void>;
+    do {
+      tail = scope.tail;
+      await tail;
+    } while (scope.tail !== tail);
   }
 
   /**

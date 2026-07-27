@@ -37,6 +37,19 @@ async function withEngine(
   }
 }
 
+/**
+ * Open one savepoint scope per name, each writing one author — the concurrent-sibling
+ * shape issue #13's tests fire from inside an outer scope. Returned unawaited so callers
+ * choose `Promise.all` or `allSettled`.
+ */
+function siblingCreates(engine: TestTransaction<PrismaClient>, names: string[]) {
+  return names.map((name) =>
+    engine.client.$transaction(async (tx) => {
+      await tx.author.create({ data: { name } });
+    }),
+  );
+}
+
 describe("installTestTransaction", () => {
   test("returns the Routing Proxy under the concrete client type and installs the engine", async () => {
     // Act: the exact call the consumer's Client Seam makes.
@@ -298,6 +311,97 @@ describe("nested $transaction", () => {
 
       // Assert: the batch is atomic — its successful member is undone too.
       expect(await engine.client.author.count({ where: { name: "tx-batch-ok" } })).toBe(0);
+    });
+  });
+
+  test("concurrent sibling $transaction(fn) calls inside an outer one serialize and all land", async () => {
+    await withEngine(async (engine) => {
+      // Act: the consumer shape from issue #13 — an outer scope whose callback fires
+      // several inner scopes together. Their savepoints must not interleave.
+      await engine.client.$transaction(async () => {
+        await Promise.all(siblingCreates(engine, ["tx-sibling-1", "tx-sibling-2", "tx-sibling-3"]));
+      });
+
+      // Assert: every sibling's write is in the test transaction, none committed.
+      expect(
+        await engine.client.author.count({ where: { name: { contains: "tx-sibling-" } } }),
+      ).toBe(3);
+      expect(await rawDb.author.count({ where: { name: { contains: "tx-sibling-" } } })).toBe(0);
+    });
+  });
+
+  test("a throwing sibling undoes only its own writes; the others and the outer scope survive", async () => {
+    await withEngine(async (engine) => {
+      // Act: two siblings race inside an outer scope that has already written; one
+      // sibling fails after writing.
+      await engine.client.$transaction(async (outer) => {
+        await outer.author.create({ data: { name: "tx-sib-outer" } });
+        const [ok, boom] = await Promise.allSettled([
+          ...siblingCreates(engine, ["tx-sib-ok"]),
+          engine.client.$transaction(async (tx) => {
+            await tx.author.create({ data: { name: "tx-sib-boom" } });
+            throw new Error("boom");
+          }),
+        ]);
+        expect(ok!.status).toBe("fulfilled");
+        expect(boom!.status).toBe("rejected");
+      });
+
+      // Assert: only the throwing sibling's write is gone.
+      expect(await engine.client.author.count({ where: { name: "tx-sib-outer" } })).toBe(1);
+      expect(await engine.client.author.count({ where: { name: "tx-sib-ok" } })).toBe(1);
+      expect(await engine.client.author.count({ where: { name: "tx-sib-boom" } })).toBe(0);
+    });
+  });
+
+  test("Promise.all rejecting early leaves no straggler sibling to corrupt the outer scope", async () => {
+    await withEngine(async (engine) => {
+      // Act: sibling 1 throws, so `Promise.all` rejects the outer callback while later
+      // siblings are still queued. Those stragglers must finish inside the outer
+      // savepoint before it rolls back — not interleave with the rollback.
+      await expect(
+        engine.client.$transaction(async () => {
+          await Promise.all([
+            engine.client.$transaction(async (tx) => {
+              await tx.author.create({ data: { name: "tx-straggler-1" } });
+              throw new Error("boom");
+            }),
+            ...siblingCreates(engine, ["tx-straggler-2", "tx-straggler-3"]),
+          ]);
+        }),
+      ).rejects.toThrow("boom");
+
+      // Assert: the outer rollback took every sibling's write with it, and the test
+      // transaction stays healthy.
+      expect(
+        await engine.client.author.count({ where: { name: { contains: "tx-straggler-" } } }),
+      ).toBe(0);
+    });
+  });
+
+  test("scopes inside a concurrent sibling nest under that sibling, not the outer scope", async () => {
+    await withEngine(async (engine) => {
+      // Act: the second sibling completes two concurrent grandchild scopes — which
+      // must serialize against each other, one level down — then throws: its rollback
+      // must take both grandchildren's released savepoints down with it.
+      await engine.client.$transaction(async () => {
+        await Promise.allSettled([
+          ...siblingCreates(engine, ["tx-gc-keep"]),
+          engine.client.$transaction(async (tx) => {
+            await tx.author.create({ data: { name: "tx-gc-sibling" } });
+            await Promise.all(siblingCreates(engine, ["tx-gc-inner-1", "tx-gc-inner-2"]));
+            throw new Error("boom");
+          }),
+        ]);
+      });
+
+      // Assert: the healthy sibling survives; the throwing one's own write and both
+      // its grandchildren's are gone.
+      expect(await engine.client.author.count({ where: { name: "tx-gc-keep" } })).toBe(1);
+      expect(await engine.client.author.count({ where: { name: "tx-gc-sibling" } })).toBe(0);
+      expect(
+        await engine.client.author.count({ where: { name: { contains: "tx-gc-inner-" } } }),
+      ).toBe(0);
     });
   });
 
