@@ -280,12 +280,31 @@ export class TestTransaction<Client extends MinimalClient> {
     await tx.$executeRawUnsafe(`SAVEPOINT ${name}`);
     try {
       const result = await op();
+      await this.drainChildren();
       await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${name}`);
       return result;
     } catch (error) {
+      await this.drainChildren();
       await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${name}`);
       throw error;
     }
+  }
+
+  // A scope's `op` can settle while children are still queued — `Promise.all` rejects
+  // on the first sibling failure, leaving later siblings waiting for their turn. They
+  // must finish inside this scope's savepoint before it releases or rolls back, or
+  // their savepoints would interleave with its exit. Runs inside the scope's own
+  // `scopeQueue.run`, so the store is this scope's queue; the loop re-checks because a
+  // draining child can enqueue children of its own. Waiting on children cannot
+  // deadlock: a child never waits on the turn its parent holds.
+  private async drainChildren(): Promise<void> {
+    const scope = this.scopeQueue.getStore();
+    if (!scope) return;
+    let tail: Promise<void>;
+    do {
+      tail = scope.tail;
+      await tail;
+    } while (scope.tail !== tail);
   }
 
   /**

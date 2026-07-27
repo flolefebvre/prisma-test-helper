@@ -349,10 +349,37 @@ describe("nested $transaction", () => {
     });
   });
 
-  test("a scope inside a concurrent sibling nests under that sibling, not the outer scope", async () => {
+  test("Promise.all rejecting early leaves no straggler sibling to corrupt the outer scope", async () => {
     await withEngine(async (engine) => {
-      // Act: the second sibling completes a grandchild scope, then throws — its
-      // rollback must take the grandchild's released savepoint down with it.
+      // Act: sibling 1 throws, so `Promise.all` rejects the outer callback while later
+      // siblings are still queued. Those stragglers must finish inside the outer
+      // savepoint before it rolls back — not interleave with the rollback.
+      await expect(
+        engine.client.$transaction(async () => {
+          await Promise.all(
+            [1, 2, 3].map((i) =>
+              engine.client.$transaction(async (tx) => {
+                await tx.author.create({ data: { name: `tx-straggler-${i}` } });
+                if (i === 1) throw new Error("boom");
+              }),
+            ),
+          );
+        }),
+      ).rejects.toThrow("boom");
+
+      // Assert: the outer rollback took every sibling's write with it, and the test
+      // transaction stays healthy.
+      expect(
+        await engine.client.author.count({ where: { name: { contains: "tx-straggler-" } } }),
+      ).toBe(0);
+    });
+  });
+
+  test("scopes inside a concurrent sibling nest under that sibling, not the outer scope", async () => {
+    await withEngine(async (engine) => {
+      // Act: the second sibling completes two concurrent grandchild scopes — which
+      // must serialize against each other, one level down — then throws: its rollback
+      // must take both grandchildren's released savepoints down with it.
       await engine.client.$transaction(async () => {
         await Promise.allSettled([
           engine.client.$transaction(async (tx) => {
@@ -360,19 +387,25 @@ describe("nested $transaction", () => {
           }),
           engine.client.$transaction(async (tx) => {
             await tx.author.create({ data: { name: "tx-gc-sibling" } });
-            await engine.client.$transaction(async (inner) => {
-              await inner.author.create({ data: { name: "tx-gc-inner" } });
-            });
+            await Promise.all(
+              [1, 2].map((i) =>
+                engine.client.$transaction(async (inner) => {
+                  await inner.author.create({ data: { name: `tx-gc-inner-${i}` } });
+                }),
+              ),
+            );
             throw new Error("boom");
           }),
         ]);
       });
 
-      // Assert: the healthy sibling survives; the throwing one's own write and its
-      // grandchild's are both gone.
+      // Assert: the healthy sibling survives; the throwing one's own write and both
+      // its grandchildren's are gone.
       expect(await engine.client.author.count({ where: { name: "tx-gc-keep" } })).toBe(1);
       expect(await engine.client.author.count({ where: { name: "tx-gc-sibling" } })).toBe(0);
-      expect(await engine.client.author.count({ where: { name: "tx-gc-inner" } })).toBe(0);
+      expect(
+        await engine.client.author.count({ where: { name: { contains: "tx-gc-inner-" } } }),
+      ).toBe(0);
     });
   });
 
