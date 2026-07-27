@@ -37,6 +37,19 @@ async function withEngine(
   }
 }
 
+/**
+ * Open one savepoint scope per name, each writing one author — the concurrent-sibling
+ * shape issue #13's tests fire from inside an outer scope. Returned unawaited so callers
+ * choose `Promise.all` or `allSettled`.
+ */
+function siblingCreates(engine: TestTransaction<PrismaClient>, names: string[]) {
+  return names.map((name) =>
+    engine.client.$transaction(async (tx) => {
+      await tx.author.create({ data: { name } });
+    }),
+  );
+}
+
 describe("installTestTransaction", () => {
   test("returns the Routing Proxy under the concrete client type and installs the engine", async () => {
     // Act: the exact call the consumer's Client Seam makes.
@@ -306,13 +319,7 @@ describe("nested $transaction", () => {
       // Act: the consumer shape from issue #13 — an outer scope whose callback fires
       // several inner scopes together. Their savepoints must not interleave.
       await engine.client.$transaction(async () => {
-        await Promise.all(
-          [1, 2, 3].map((i) =>
-            engine.client.$transaction(async (tx) => {
-              await tx.author.create({ data: { name: `tx-sibling-${i}` } });
-            }),
-          ),
-        );
+        await Promise.all(siblingCreates(engine, ["tx-sibling-1", "tx-sibling-2", "tx-sibling-3"]));
       });
 
       // Assert: every sibling's write is in the test transaction, none committed.
@@ -330,9 +337,7 @@ describe("nested $transaction", () => {
       await engine.client.$transaction(async (outer) => {
         await outer.author.create({ data: { name: "tx-sib-outer" } });
         const [ok, boom] = await Promise.allSettled([
-          engine.client.$transaction(async (tx) => {
-            await tx.author.create({ data: { name: "tx-sib-ok" } });
-          }),
+          ...siblingCreates(engine, ["tx-sib-ok"]),
           engine.client.$transaction(async (tx) => {
             await tx.author.create({ data: { name: "tx-sib-boom" } });
             throw new Error("boom");
@@ -356,14 +361,13 @@ describe("nested $transaction", () => {
       // savepoint before it rolls back — not interleave with the rollback.
       await expect(
         engine.client.$transaction(async () => {
-          await Promise.all(
-            [1, 2, 3].map((i) =>
-              engine.client.$transaction(async (tx) => {
-                await tx.author.create({ data: { name: `tx-straggler-${i}` } });
-                if (i === 1) throw new Error("boom");
-              }),
-            ),
-          );
+          await Promise.all([
+            engine.client.$transaction(async (tx) => {
+              await tx.author.create({ data: { name: "tx-straggler-1" } });
+              throw new Error("boom");
+            }),
+            ...siblingCreates(engine, ["tx-straggler-2", "tx-straggler-3"]),
+          ]);
         }),
       ).rejects.toThrow("boom");
 
@@ -382,18 +386,10 @@ describe("nested $transaction", () => {
       // must take both grandchildren's released savepoints down with it.
       await engine.client.$transaction(async () => {
         await Promise.allSettled([
-          engine.client.$transaction(async (tx) => {
-            await tx.author.create({ data: { name: "tx-gc-keep" } });
-          }),
+          ...siblingCreates(engine, ["tx-gc-keep"]),
           engine.client.$transaction(async (tx) => {
             await tx.author.create({ data: { name: "tx-gc-sibling" } });
-            await Promise.all(
-              [1, 2].map((i) =>
-                engine.client.$transaction(async (inner) => {
-                  await inner.author.create({ data: { name: `tx-gc-inner-${i}` } });
-                }),
-              ),
-            );
+            await Promise.all(siblingCreates(engine, ["tx-gc-inner-1", "tx-gc-inner-2"]));
             throw new Error("boom");
           }),
         ]);
