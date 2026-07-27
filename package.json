@@ -1,6 +1,6 @@
 {
   "name": "@flefebvre/prisma-test-helper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per worker. Postgres-only.",
   "type": "module",
   "license": "MIT",
