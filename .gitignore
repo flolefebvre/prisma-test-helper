@@ -7,3 +7,6 @@ tests/generated
 .env.*
 
 coverage
+
+# Claude Code worktrees live inside the checkout; keep git and Prettier out of them.
+.claude/worktrees/
