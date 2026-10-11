@@ -1,14 +1,13 @@
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, onTestFinished, test } from "vitest";
 
 import { isDatabaseSetUp, setupDatabase } from "../../src/index.js";
 import { db } from "../db/client.js";
 
 // Ported from pvm3.0's harness suite: the smoke test that the whole recipe works from a
-// consumer's seat. Nothing here reaches for library internals — `setupDatabase()` and the
-// mocked client module are the entire surface, which is the point. `db` is the Routing
-// Proxy, installed by the Client Seam in tests/setup.ts.
+// consumer's seat. Nothing here reaches for library internals — `setupDatabase(db)` and
+// the app's own client module are the entire surface, which is the point.
 
-setupDatabase();
+setupDatabase(db);
 
 test("reports the file as opted in, so factories may run", () => {
   // The `true` half of the guard; tests/integration/opt-in.test.ts holds the `false` half.
@@ -27,14 +26,14 @@ test("inserts an author and reads it back", async () => {
   expect(authors[0]?.name).toBe("Ada");
 });
 
-test("starts empty — the previous test's transaction was rolled back", async () => {
+test("starts empty — the previous test's rows were reset", async () => {
   // Assert: this test runs after the insert above, yet the table is empty, proving every
-  // test starts from a pristine Worker Database.
+  // test starts from an empty Worker Database.
   expect(await db.author.count()).toBe(0);
 });
 
-test("a relation written across two tables is rolled back whole", async () => {
-  // Arrange + Act: the required relation makes this two statements in one transaction.
+test("a relation written across two tables commits whole", async () => {
+  // Arrange + Act: the required relation makes this two inserts.
   const author = await db.author.create({
     data: { name: "Grace", posts: { create: [{ title: "On compilers" }] } },
     include: { posts: true },
@@ -46,23 +45,36 @@ test("a relation written across two tables is rolled back whole", async () => {
 });
 
 test("the relation is gone too", async () => {
-  // Assert: both tables, not just the one the test touched directly.
+  // Assert: both tables, not just the one the test touched directly — the Reset empties
+  // tables bound by a foreign key without a cascade.
   expect(await db.author.count()).toBe(0);
   expect(await db.post.count()).toBe(0);
 });
 
-// Pins the ordering `setupDatabase`'s docs promise: registered after that call, this
-// hook is *earlier* in the reverse-order stack than the rollback, so the database is
-// still reachable from it. If the rollback ever ran first, the query below would throw
-// the engine's "no test transaction live" error and fail the test.
-let cleanupSawLiveTransaction = false;
+// Pins the ordering `setupDatabase`'s docs promise: registered after that call, this hook
+// is *earlier* in the reverse-order stack than the Reset, so it still sees the test's
+// rows.
+let authorsSeenByCleanup: number | null = null;
 
 afterEach(async () => {
-  await db.author.count();
-  cleanupSawLiveTransaction = true;
+  authorsSeenByCleanup = await db.author.count();
 });
 
-test("cleanup registered after setupDatabase() runs inside the live transaction", () => {
+test("cleanup registered after setupDatabase() runs before the Reset", async () => {
+  await db.author.create({ data: { name: "cleanup-sees-me" } });
+});
+
+test("…and saw the previous test's row", () => {
   // Assert on the previous test's afterEach — this one's has not run yet.
-  expect(cleanupSawLiveTransaction).toBe(true);
+  expect(authorsSeenByCleanup).toBe(1);
+});
+
+test("onTestFinished cleanup can still read the database", async () => {
+  // Fired after every afterEach, so past the Reset: the database is empty, but reachable
+  // — nothing parks or closes a connection between tests any more. (Rows written here
+  // would survive into the next test; the docs keep writes in afterEach.)
+  onTestFinished(async () => {
+    expect(await db.author.count()).toBe(0);
+  });
+  await db.author.create({ data: { name: "finished" } });
 });

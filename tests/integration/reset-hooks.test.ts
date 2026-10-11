@@ -13,16 +13,18 @@ let authorsAtHookTime: number | null = null;
 
 registerResetHook(async (context) => {
   seen.push(context);
-  // Runs after the Test Transaction opened, so a hook can already query — this is what
-  // lets a factory reset sequences against live data.
+  // Runs before the test body, after the previous test's Reset, so a hook can already
+  // query — and sees an empty database.
   authorsAtHookTime = await db.author.count();
 });
 
-setupDatabase();
+setupDatabase(db);
 
-test("receives the running test's name", () => {
+test("receives the running test's name", async () => {
   expect(seen).toHaveLength(1);
   expect(seen.at(-1)!.testName).toBe("receives the running test's name");
+  // Left behind on purpose: no later hook may see it.
+  await db.author.create({ data: { name: "reset-hooks" } });
 });
 
 test("receives a seed derived from that name alone", () => {
@@ -33,8 +35,9 @@ test("receives a seed derived from that name alone", () => {
   expect(seen.at(-1)!.seed).toBe(2828983899);
 });
 
-test("runs after the Test Transaction is open", () => {
-  // Assert: the hook's own query succeeded, and saw a clean database.
+test("runs after the previous test's Reset", () => {
+  // Assert: the hook's own query succeeded, and saw the row the first test committed
+  // already cleared.
   expect(authorsAtHookTime).toBe(0);
 });
 

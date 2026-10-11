@@ -1,11 +1,11 @@
 ---
 name: prisma-test-helper-setup
-description: Wire the @flefebvre/prisma-test-helper test harness into a Prisma + Vitest project — install the package and scaffold its five wiring files. Use when the user wants an isolated, rolled-back Postgres database for their tests, asks to install or set up prisma-test-helper, or wants to replace database truncation and cleanup code in their test suite with per-test transactions.
+description: Wire the @flefebvre/prisma-test-helper test harness into a Prisma + Vitest project — install the package and scaffold its five wiring files. Use when the user wants an isolated Postgres database, emptied after every test, for their tests, asks to install or set up prisma-test-helper, or wants to replace hand-written database truncation and cleanup code in their test suite.
 ---
 
 # prisma-test-helper-setup
 
-Wire `@flefebvre/prisma-test-helper` into this project: one throwaway Postgres container per run, migrations applied once to a **Template Database**, one **Worker Database** cloned per Vitest worker slot, every test in a **Test Transaction** that is rolled back.
+Wire `@flefebvre/prisma-test-helper` into this project: one throwaway Postgres container per run, migrations applied once to a **Template Database**, one **Worker Database** cloned per Vitest worker slot, tests that commit for real, and a **Reset** that empties the Worker Database again after every test.
 
 This skill is the one-time installer. Once the smoke test passes, remove it and keep `prisma-test-helper` — the day-to-day usage skill — installed.
 
@@ -22,7 +22,7 @@ Read `package.json` and confirm every requirement, reporting any that fail befor
 - Committed migrations under the schema's migrations directory — `prisma migrate deploy` is what the harness runs, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. If it is not, the wiring can still be scaffolded, but say plainly that step 8's verification cannot run until Docker is started.
 
-**A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the wiring runs under Vitest, which transforms modules through Vite rather than leaving them to Node's `require`. A CommonJS project — a stock Next.js app, for instance — wires up and passes. Note the project's module system and carry on; it decides the import style in steps 3 and 6, nothing more.
+**A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the wiring runs under Vitest, which transforms modules through Vite rather than leaving them to Node's `require`. A CommonJS project — a stock Next.js app, for instance — wires up and passes. Note the project's module system and carry on; it decides the import style in steps 3 and 8, nothing more.
 
 **Done when:** every requirement is confirmed, or the blocking ones are reported and the run has stopped.
 
@@ -38,7 +38,7 @@ pnpm add -D @flefebvre/prisma-test-helper   # npm i -D / yarn add -D / bun add -
 
 ## 3. Locate the Prisma client module
 
-The harness assumes the app reaches the database through **one module it can intercept**. Find it: search for `new PrismaClient(` across the project's source, **excluding `node_modules` and the schema's `generator client { output = … }` directory** — the generated client documents its own constructor in doc comments, so searching it yields a handful of matches that are all noise. Record two things — the **module path** and the **export name** (commonly `db` or `prisma`) — and note whether the module exports anything besides the client; step 6 depends on it.
+Tests hand the harness **the same Prisma client the app uses**, so it must live in one module. Find it: search for `new PrismaClient(` across the project's source, **excluding `node_modules` and the schema's `generator client { output = … }` directory** — the generated client documents its own constructor in doc comments, so searching it yields a handful of matches that are all noise. Record two things — the **module path** and the **export name** (commonly `db` or `prisma`); the smoke test in step 8 imports it.
 
 - **Exactly one match** → that is the module. Use it as-is; do not rewrite it.
 - **Several matches** → ask the user which one the app's code imports, rather than guessing.
@@ -62,9 +62,9 @@ The harness assumes the app reaches the database through **one module it can int
 
   **Match the project's import style rather than copying this block's.** The `.js`-suffixed relative specifier above suits an ESM project on `moduleResolution: "nodenext"`. A project on `"bundler"` resolution — Next.js, most Vite apps — writes extensionless imports and usually a path alias instead: `import { PrismaClient } from "@/generated/prisma/client"`. Read `tsconfig.json`'s `moduleResolution` and `paths`, and follow what the project's existing source already does.
 
-Throwing when `DATABASE_URL` is unset is worth keeping in an existing module too, and worth adding if the user agrees. It is the tripwire for step 6's ordering rule: if the setup file ever imports the app statically, this throw fires loudly instead of silently pointing the suite at the dev database.
+The client must be built from `DATABASE_URL` — the variable the harness points at each worker's database. A module that reads another variable or hard-codes a URL fails every file with `the client passed to setupDatabase() is connected to …`; tell the user and change it with their agreement. Throwing when `DATABASE_URL` is unset is worth keeping in an existing module too, and worth adding if the user agrees. It is the tripwire for step 6's ordering rule: if the setup file ever imports the app statically, this throw fires loudly instead of silently pointing the suite at the dev database.
 
-**Done when:** the module path and export name are known, and the file exists.
+**Done when:** the module path and export name are known, the file exists, and it builds the client from `DATABASE_URL`.
 
 ## 4. `prisma.config.ts`
 
@@ -110,47 +110,22 @@ This file must be inside `tsconfig.json`'s `include`. It carries the module augm
 
 **Done when:** the file exists, exports the setup as `default`, pins the image when a compose file named one, and is inside the TS program.
 
-## 6. `tests/setup.ts` — the Client Seam
-
-Fill in the module path and export name from step 3.
+## 6. `tests/setup.ts`
 
 ```ts
 // tests/setup.ts
-import { vi } from "vitest";
-
-import { installTestTransaction } from "@flefebvre/prisma-test-helper";
 import { setupWorkerDatabase } from "@flefebvre/prisma-test-helper/setup";
 
-const { databaseUrl, databaseName } = setupWorkerDatabase();
-
-vi.mock("../src/db/client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/db/client.js")>();
-  return { db: installTestTransaction(actual.db, databaseUrl, databaseName) };
-});
+setupWorkerDatabase();
 ```
 
-The mock path must match the specifier the app's own code imports, and the returned key must be the real export name.
+That is the whole file. It points `DATABASE_URL` at this worker's own Worker Database before any test file loads the app. Nothing is mocked: test files import the app's real client and hand it to `setupDatabase(db)`.
 
-**The app imports through a path alias** — `import { db } from "@/lib/db"`, standard in Next.js — → mock the alias, not a relative path, because the alias is the specifier every call site uses:
+**A setup file already exists** → add the import and the call at the top, above everything else in it.
 
-```ts
-vi.mock("@/lib/db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/db")>();
-  return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
-});
-```
+**Keep this file's imports of the app at zero.** ES imports hoist above statements, so a static `import { db } from "../src/db/client.js"` here would build the client _before_ `setupWorkerDatabase()` assigns `DATABASE_URL` — pointing it at the dev database, which `setupDatabase(db)` then refuses in every file. If an existing setup file imports app modules statically, turn them into dynamic `import()` calls below `setupWorkerDatabase()`. Library imports are safe: they read no environment at import time.
 
-Vitest does not read `tsconfig.json`'s `paths` on its own, so this fails with `Cannot find package '@/lib/db'` until step 7 turns alias resolution on.
-
-**The client module exports more than the client** — types, a re-exported `Prisma` namespace, helpers — → spread the original, or every call site touching one of them fails with `No "<name>" export is defined on the "<path>" mock`:
-
-```ts
-return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
-```
-
-**Keep this file's imports of the app at zero.** ES imports hoist above statements, so a static `import { db } from "../src/db/client.js"` here would build the client _before_ `setupWorkerDatabase()` assigns `DATABASE_URL` — pointing the whole suite at the dev database. App modules are reached lazily, through the `vi.mock` factory above or a dynamic `import()`. Library imports are safe: they read no environment at import time.
-
-**Done when:** the file exists, the mock path and export name match the real client module, extra exports are spread when the module has them, and the only static imports in the file are from `vitest` and `@flefebvre/prisma-test-helper`.
+**Done when:** the file calls `setupWorkerDatabase()` first, and the only static imports in it are library ones.
 
 ## 7. `vitest.config.ts`
 
@@ -170,11 +145,11 @@ export default defineConfig({
 });
 ```
 
-**A config already exists** → merge, preserving every existing key. Add the four settings above, appending to `globalSetup` and `setupFiles` if they already hold entries. Where the existing config uses `projects`, put the four settings on the project that runs the database tests, not at the root.
+**A config already exists** → merge, preserving every existing key. Add the four settings above, appending to `globalSetup` and `setupFiles` if they already hold entries; `tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads the app. Where the existing config uses `projects`, put the four settings on the project that runs the database tests, not at the root — and keep that project in the only `sequence.groupOrder` group, or the first one: as of Vitest 4.1, a later group can lease one `VITEST_POOL_ID` to two concurrent forks, which would then share a Worker Database. Projects that differ in `maxWorkers` need distinct groups, so prefer equal `maxWorkers` over a second group.
 
-`pool: "forks"` and `isolate: true` are load-bearing. If the existing config sets `pool: "threads"` or `isolate: false`, correct them and tell the user why: under `isolate: false` module state leaks across files, and the `setupDatabase()` opt-in guard relies on its module re-instantiating per file.
+`pool: "forks"` and `isolate: true` are load-bearing. If the existing config sets `pool: "threads"` or `isolate: false`, correct them and tell the user why: under `isolate: false` module state leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module re-instantiating per file.
 
-**The project uses path aliases** (`tsconfig.json` has `compilerOptions.paths`) → turn on alias resolution, or every aliased import in the setup file and the tests fails to resolve:
+**The project uses path aliases** (`tsconfig.json` has `compilerOptions.paths`) → turn on alias resolution, or every aliased import in the tests fails to resolve with `Cannot find package '@/lib/db'`:
 
 ```ts
 export default defineConfig({
@@ -185,7 +160,7 @@ export default defineConfig({
 
 Vite resolves `paths` natively — reach for the `vite-tsconfig-paths` plugin only on a Vite version too old to support the option.
 
-**The client module imports `server-only`** (common in Next.js) → alias it to the empty build the package ships for non-render environments, or mocking the module fails with the misleading `This module cannot be imported from a Client Component module`:
+**The client module imports `server-only`** (common in Next.js) → alias it to the empty build the package ships for non-render environments, or importing the module in a test fails with the misleading `This module cannot be imported from a Client Component module`:
 
 ```ts
 import { fileURLToPath } from "node:url";
@@ -204,7 +179,7 @@ The path is deliberate: `server-only` exposes only `.` in its `exports` map, so 
 
 ## 8. Prove it works
 
-Write a smoke test against a real model from the project's schema, importing the client from the module path and export name found in step 3 — two tests, in this order, so the second proves the first was rolled back:
+Write a smoke test against a real model from the project's schema, importing the client from the module path and export name found in step 3 — two tests, in this order, so the second proves the Reset emptied the database after the first:
 
 ```ts
 // tests/smoke.test.ts
@@ -213,14 +188,14 @@ import { expect, test } from "vitest";
 import { setupDatabase } from "@flefebvre/prisma-test-helper";
 import { db } from "../src/db/client.js";
 
-setupDatabase();
+setupDatabase(db);
 
-test("writes inside a test transaction", async () => {
+test("commits a write", async () => {
   await db.author.create({ data: { name: "Ada" } });
   expect(await db.author.count()).toBe(1);
 });
 
-test("sees a pristine database afterwards", async () => {
+test("sees an empty database afterwards", async () => {
   expect(await db.author.count()).toBe(0);
 });
 ```
@@ -229,7 +204,7 @@ Run the suite. Both tests must pass, and running it a **second time** must pass 
 
 A failure names its own cause: match the error against the table in the `prisma-test-helper` usage skill (or the README's "When something is mis-wired"), fix the wiring step it points at, and run again.
 
-**Done when:** the full suite passes twice in a row, and the pristine-database test is genuinely running (not skipped).
+**Done when:** the full suite passes twice in a row, and the empty-database test is genuinely running (not skipped).
 
 ## 9. Hand over
 
@@ -237,4 +212,4 @@ Report what was created or merged, and the Postgres image in use. Then:
 
 - **Ask whether to delete `tests/smoke.test.ts`** or keep it as a regression check on the wiring. Do not delete it without an answer.
 - Point the user at the `prisma-test-helper` usage skill for writing tests from here, and say this installer skill can be removed now.
-- Name the one rule that outlives the install: `setupDatabase()` at the top of every database-touching test file, once.
+- Name the one rule that outlives the install: `setupDatabase(db)` at the top of every database-touching test file, once, with the app's client.

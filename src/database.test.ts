@@ -3,36 +3,34 @@ import { describe, expect, test } from "vitest";
 import {
   hashName,
   isDatabaseSetUp,
+  registerDatabase,
   registerResetHook,
-  setupDatabase,
   type ResetHookContext,
 } from "./database.js";
-import { installTestTransaction, type MinimalClient } from "./transaction.js";
+import type { ResetClient } from "./reset.js";
 
-// Docker-free: the engine is installed around a stub client that parks its "transaction"
-// the way a real one does — `$transaction` calls the callback, which hangs until the
-// engine rejects it on rollback. That is enough to drive `setupDatabase`'s hooks without
-// a database. The per-test rollback these hooks produce is proven for real by the
-// dogfood suite (tests/integration/harness.test.ts).
+// Docker-free: `registerDatabase` — `setupDatabase` with its environment reads made
+// explicit — is driven around a stub client that answers the guard's check and the
+// discovery query, and records every Reset it is sent. That is enough to pin the
+// lifecycle's shape: when the Reset runs relative to the Reset Hooks. That the Reset
+// really empties a database is proven by tests/integration/reset.test.ts.
 
 const WORKER_URL = "postgresql://u:p@localhost:5432/prisma_test_1";
 
-/** Records every engine event, so hook ordering relative to the transaction is checkable. */
+/** Records every lifecycle event, so hook ordering relative to the Reset is checkable. */
 const events: string[] = [];
 
-const stub: MinimalClient = {
-  $transaction: (async (
-    fn: (tx: { $executeRawUnsafe: () => Promise<unknown> }) => Promise<unknown>,
-  ) => {
-    events.push("transaction opened");
-    return fn({ $executeRawUnsafe: async () => undefined });
-  }) as MinimalClient["$transaction"],
+const stub: ResetClient = {
+  $queryRawUnsafe: async (query: string) =>
+    query.includes("current_database()") ? [{ name: "prisma_test_1" }] : [],
+  $executeRawUnsafe: async () => {
+    events.push("reset");
+    return 0;
+  },
 };
 
-installTestTransaction(stub, WORKER_URL, "prisma_test");
-
-// Read before `setupDatabase()` runs: the opt-in flag has to start out false, and
-// `setupDatabase()` below flips it during collection.
+// Read before `registerDatabase()` runs: the opt-in flag has to start out false, and the
+// call below flips it during collection.
 const setUpBeforeOptIn = isDatabaseSetUp();
 
 // The FNV-1a offset basis and prime are fixed, so these are the values every consumer of
@@ -59,6 +57,8 @@ describe("hashName", () => {
   });
 });
 
+// Named for the public entry point it stands in for, which also keeps the pinned seed
+// below identical to the one the rollback-era suite pinned.
 describe("setupDatabase", () => {
   const seen: ResetHookContext[] = [];
   let asyncHookFinished = false;
@@ -76,11 +76,16 @@ describe("setupDatabase", () => {
     asyncHookFinished = true;
   });
 
-  setupDatabase();
+  registerDatabase(stub, WORKER_URL, "prisma_test");
 
   test("flips the opt-in flag that factories guard on", () => {
     expect(setUpBeforeOptIn).toBe(false);
     expect(isDatabaseSetUp()).toBe(true);
+  });
+
+  test("resets once before the file's first test, then runs the hooks", () => {
+    // The very first events of the file: the `beforeAll` Reset, then this test's hook.
+    expect(events.slice(0, 2)).toEqual(["reset", "reset hook"]);
   });
 
   test("hands each hook the current test name and its seed", () => {
@@ -97,8 +102,8 @@ describe("setupDatabase", () => {
     expect(seen.at(-1)!.seed).toBe(1431033295);
   });
 
-  test("runs hooks after the transaction opens, and awaits async ones", () => {
-    expect(events.slice(-2)).toEqual(["transaction opened", "reset hook"]);
+  test("resets after every test, before the next test's hooks, and awaits async hooks", () => {
+    expect(events.slice(-3)).toEqual(["reset hook", "reset", "reset hook"]);
     expect(asyncHookFinished).toBe(true);
   });
 
@@ -108,5 +113,11 @@ describe("setupDatabase", () => {
     const thisTest = seen.at(-1)!.testName;
 
     expect(seen.filter((context) => context.testName === thisTest)).toHaveLength(1);
+  });
+
+  test("a second call in the same file names the duplicate", () => {
+    expect(() => registerDatabase(stub, WORKER_URL, "prisma_test")).toThrow(
+      "setupDatabase() was called twice in this file",
+    );
   });
 });

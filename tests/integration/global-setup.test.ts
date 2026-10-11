@@ -34,6 +34,6 @@ test("provisions one Worker Database per worker slot", async () => {
 
 test("provides the Template Database name alongside the URI", () => {
   // The name has to cross the process boundary too: the worker rewrites the URI path
-  // from it, and the Test Transaction guard derives its accepted shape from it.
+  // from it, and the Worker Database guard derives its accepted shape from it.
   expect(inject("templateDatabaseName")).toBe("prisma_test");
 });

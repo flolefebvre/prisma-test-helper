@@ -4,38 +4,36 @@ import { inject } from "vitest";
 // once per test file, inside the worker, before any app module loads — see the ordering
 // note on `setupWorkerDatabase`.
 
-/** What {@link setupWorkerDatabase} hands back: everything the Client Seam needs. */
+/**
+ * What {@link setupWorkerDatabase} hands back. The harness itself reads both through the
+ * environment and the provided context, so a setup file may ignore the return value.
+ */
 export interface WorkerDatabase {
   /** Connection URL of this worker's Worker Database — also set as `DATABASE_URL`. */
   databaseUrl: string;
-  /** The Template Database name it was cloned from, for the Test Transaction guard. */
+  /** The Template Database name it was cloned from — the root of the guarded name shape. */
   databaseName: string;
 }
 
 /**
  * Point this worker at its own Worker Database.
  *
- * Call it at the top of your Vitest setup file, above the `vi.mock` that installs the
- * Client Seam. It reads what `createGlobalSetup` provided, rewrites the URI onto this
- * worker's clone (`<databaseName>_<VITEST_POOL_ID>`), sets `process.env.DATABASE_URL`,
- * and returns both halves — the URL and the template name — because
- * `installTestTransaction` needs both.
+ * Call it from your Vitest setup file. It reads what `createGlobalSetup` provided,
+ * rewrites the URI onto this worker's clone (`<databaseName>_<VITEST_POOL_ID>`), sets
+ * `process.env.DATABASE_URL`, and returns both halves — the URL and the template name.
  *
  * **Ordering matters.** The assignment below must happen before any module that reads
  * `DATABASE_URL` at import time is loaded, and ES imports hoist above statements — so
- * the setup file must keep *zero* static imports of your app, and reach for them with a
- * dynamic `import()` (or a lazy `vi.mock` factory) instead. A single static app import
- * would parse the environment against your dev `DATABASE_URL` and point the whole suite
- * at your dev database.
+ * the setup file must keep *zero* static imports of your app; reach for app modules
+ * with a dynamic `import()` if it ever needs one. A single static app import would
+ * build your client against your dev `DATABASE_URL` and point the whole suite — and its
+ * Reset — at your dev database; `setupDatabase(db)` would then refuse to run.
  *
  * @example
- * // test/setup.ts
- * const { databaseUrl, databaseName } = setupWorkerDatabase();
+ * // tests/setup.ts
+ * import { setupWorkerDatabase } from "@flefebvre/prisma-test-helper/setup";
  *
- * vi.mock("../src/db/client", async (importOriginal) => {
- *   const actual = await importOriginal<typeof import("../src/db/client")>();
- *   return { db: installTestTransaction(actual.db, databaseUrl, databaseName) };
- * });
+ * setupWorkerDatabase();
  */
 export function setupWorkerDatabase(): WorkerDatabase {
   const poolId = process.env.VITEST_POOL_ID;

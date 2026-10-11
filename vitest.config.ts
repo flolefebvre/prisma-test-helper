@@ -11,9 +11,9 @@ export default defineConfig({
           include: ["src/**/*.test.ts"],
           clearMocks: true,
           restoreMocks: true,
-          // Distinct groupOrder is required when projects differ in maxWorkers;
-          // ordering unit first keeps the cheap feedback ahead of the container boot.
-          sequence: { groupOrder: 0 },
+          // Same maxWorkers as the integration project, so both share one group —
+          // see the note there.
+          maxWorkers: 2,
         },
       },
       // Boots a real container via the repo's own global-setup file — the same
@@ -25,19 +25,22 @@ export default defineConfig({
           include: ["tests/**/*.test.ts"],
           // Starts the container and provisions the Worker Databases, once per run.
           globalSetup: ["tests/global-setup.ts"],
-          // Points DATABASE_URL at this worker's Worker Database and installs the
-          // Client Seam, once per test file.
+          // Points DATABASE_URL at this worker's Worker Database, once per test file.
           setupFiles: ["tests/setup.ts"],
           // Both are Vitest defaults, set explicitly because the harness depends on
           // them: together they re-run `setupFiles` in a fresh process per test file.
           // Under `isolate: false` module state leaks across files, and the
-          // `setupDatabase()` opt-in guard relies on its module re-instantiating per
+          // `setupDatabase(db)` opt-in guard relies on its module re-instantiating per
           // file — `isDatabaseSetUp()` would report a neighbouring file's opt-in.
           pool: "forks",
           isolate: true,
-          // Pinned so the suite can assert the exact set of Worker Databases.
+          // Pinned so the suite can assert the exact set of Worker Databases — and
+          // equal to the unit project's, so the run is one group with no `groupOrder`.
+          // Vitest 4.1 can lease one VITEST_POOL_ID to two concurrent forks across
+          // groupOrder groups (a finished group's last pool id is freed after the next
+          // group has rebuilt its id map), so a second group's forks could share a
+          // Worker Database and see each other's commits and Resets.
           maxWorkers: 2,
-          sequence: { groupOrder: 1 },
         },
       },
     ],
