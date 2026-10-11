@@ -35,11 +35,8 @@ export default defineConfig({
           pool: "forks",
           isolate: true,
           // Pinned so the suite can assert the exact set of Worker Databases — and
-          // equal to the unit project's, so the run is one group with no `groupOrder`.
-          // Vitest 4.1 can lease one VITEST_POOL_ID to two concurrent forks across
-          // groupOrder groups (a finished group's last pool id is freed after the next
-          // group has rebuilt its id map), so a second group's forks could share a
-          // Worker Database and see each other's commits and Resets.
+          // equal to the unit project's, so the run is one group with no `groupOrder`
+          // (projects that differ in maxWorkers need distinct groups).
           maxWorkers: 2,
         },
       },

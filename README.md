@@ -76,11 +76,11 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 
 ## Requirements
 
-- **Node >= 20.** The package ships ESM only, but your project need not be — the wiring
+- **Node ^22.12, ^24 or >= 26**, as Vitest 5 requires. The package ships ESM only, but your project need not be — the wiring
   runs under Vitest, which transforms modules through Vite, so a CommonJS project (a
   stock Next.js app, say) works too.
 - **Docker** (or another container runtime Testcontainers can reach).
-- Peer dependencies: **Vitest ^4** and **Prisma ^7**, with your migrations committed
+- Peer dependencies: **Vitest ^5.0.3** and **Prisma ^7**, with your migrations committed
   (`prisma migrate deploy` is what the harness runs).
 
 ## Installation
@@ -193,10 +193,10 @@ export default defineConfig({
 leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module
 re-instantiating per file.
 
-If you split your config into `projects`, the project that runs database tests must be the
-only `sequence.groupOrder` group, or the first one: as of Vitest 4.1, a later group can
-lease one `VITEST_POOL_ID` to two concurrent forks, which would then share a Worker
-Database.
+If you split your config into `projects`, any `sequence.groupOrder` layout works. Vitest
+before 5.0.3 could lease one `VITEST_POOL_ID` to two concurrent forks across groups
+([vitest#11391](https://github.com/vitest-dev/vitest/issues/11391)), which would then share
+a Worker Database; that is why 5.0.3 is the minimum.
 
 ## Writing tests
 
