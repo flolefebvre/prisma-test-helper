@@ -17,8 +17,8 @@ Work the steps in order. Each one lands before the next starts.
 
 Read `package.json` and confirm every requirement, reporting any that fail before touching a file:
 
-- `prisma` and `@prisma/client` at **^7**, `vitest` at **^4**. On older majors, stop and tell the user which to upgrade; do not attempt the wiring.
-- Node >= 20 (`engines`, `.nvmrc`, or `node -v`).
+- `prisma` and `@prisma/client` at **^7**, `vitest` at **^5.0.3**. On older versions, stop and tell the user which to upgrade; do not attempt the wiring.
+- Node ^22.12, ^24 or >= 26, as Vitest 5 requires (`engines`, `.nvmrc`, or `node -v`).
 - Committed migrations under the schema's migrations directory — `prisma migrate deploy` is what the harness runs, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. If it is not, the wiring can still be scaffolded, but say plainly that step 8's verification cannot run until Docker is started.
 
@@ -145,7 +145,7 @@ export default defineConfig({
 });
 ```
 
-**A config already exists** → merge, preserving every existing key. Add the four settings above, appending to `globalSetup` and `setupFiles` if they already hold entries; `tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads the app. Where the existing config uses `projects`, put the four settings on the project that runs the database tests, not at the root — and keep that project in the only `sequence.groupOrder` group, or the first one: as of Vitest 4.1, a later group can lease one `VITEST_POOL_ID` to two concurrent forks, which would then share a Worker Database. Projects that differ in `maxWorkers` need distinct groups, so prefer equal `maxWorkers` over a second group.
+**A config already exists** → merge, preserving every existing key. Add the four settings above, appending to `globalSetup` and `setupFiles` if they already hold entries; `tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads the app. Where the existing config uses `projects`, put the four settings on the project that runs the database tests, not at the root. Any `sequence.groupOrder` layout is fine: the Vitest ^5.0.3 floor rules out the pool-id race that once let two forks share a Worker Database.
 
 `pool: "forks"` and `isolate: true` are load-bearing. If the existing config sets `pool: "threads"` or `isolate: false`, correct them and tell the user why: under `isolate: false` module state leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module re-instantiating per file.
 
