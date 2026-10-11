@@ -3,7 +3,7 @@
   "url": "https://context7.com/flolefebvre/prisma-test-helper",
   "public_key": "pk_4Czm4B19o3pEf9xBjNGnP",
   "projectTitle": "@flefebvre/prisma-test-helper",
-  "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per Vitest worker, one rolled-back transaction per test. Postgres-only.",
+  "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per Vitest worker, tests that commit for real and a batched reset after every test. Postgres-only.",
   "branch": "main",
   "folders": [],
   "excludeFolders": [
@@ -19,10 +19,11 @@
   "excludeFiles": ["AGENTS.md", "CLAUDE.md"],
   "rules": [
     "Postgres only. The harness starts a real Postgres in Docker and clones databases with CREATE DATABASE ... TEMPLATE; SQLite, MySQL and mocks are not supported.",
-    "Call setupDatabase() once at the top level of a test file, outside any test or describe block. Files that never call it register no hooks and skip the database entirely.",
-    "Never write cleanup code. Each test runs in a Test Transaction that is rolled back when it ends, so truncation, delete-all hooks and ordering workarounds are unnecessary and wrong.",
+    "Call setupDatabase(db) once at the top level of a test file, outside any test or describe block, passing the app's own Prisma client. Files that never call it register no hooks and get no reset between their tests.",
+    "Never write cleanup code. Tests commit for real, and the Reset empties every table and rewinds every sequence before a file's first test and after every test, so truncation, delete-all hooks and ordering workarounds are unnecessary and wrong.",
+    "Writes in beforeAll are allowed but are removed by the Reset after the first test; build per-test data in the test, in beforeEach, or in a factory.",
     "Import the public API from \"@flefebvre/prisma-test-helper\"; the Vitest wiring entry points are the \"@flefebvre/prisma-test-helper/global-setup\" and \"@flefebvre/prisma-test-helper/setup\" subpaths.",
-    "Consumer code must reach the database through its own Prisma client module, swapped for the Routing Proxy in the Client Seam (a vi.mock block in the consumer's Vitest setup file) via installTestTransaction.",
+    "The Vitest setup file only calls setupWorkerDatabase() and must keep zero static imports of the app: the app's Prisma client must be built from DATABASE_URL after that call. Nothing is mocked; $transaction and second clients behave as in production.",
     "Test data factories live in the consumer project, not in the harness. They plug in through the Reset Hook, which receives { testName, seed } for deterministic seeding.",
     "Docker must be available at test time; Testcontainers starts and removes the container automatically, including after a crash."
   ],

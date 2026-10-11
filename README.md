@@ -1,7 +1,7 @@
 # @flefebvre/prisma-test-helper
 
-Fast, isolated Postgres for Prisma + Vitest tests: a real database per worker, a
-rolled-back transaction per test, zero cleanup code.
+Fast, isolated Postgres for Prisma + Vitest tests: a real database per worker, an empty
+database for every test, zero cleanup code.
 
 [![npm version](https://img.shields.io/npm/v/%40flefebvre%2Fprisma-test-helper)](https://www.npmjs.com/package/@flefebvre/prisma-test-helper)
 [![CI](https://github.com/flolefebvre/prisma-test-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/flolefebvre/prisma-test-helper/actions/workflows/ci.yml)
@@ -15,8 +15,8 @@ test after it — or you swap the database for SQLite or a mock, and stop testin
 actual migrations, constraints, and queries.
 
 This harness removes the trade-off. Each test run gets one throwaway Postgres container;
-each Vitest worker gets its own database; each test runs inside a transaction that is
-rolled back when it ends. Your tests look like this:
+each Vitest worker gets its own database; tests commit for real, and after every test the
+harness empties that database again in one batched statement. Your tests look like this:
 
 ```ts
 import { expect, test } from "vitest";
@@ -24,7 +24,7 @@ import { expect, test } from "vitest";
 import { setupDatabase } from "@flefebvre/prisma-test-helper";
 import { db } from "../src/db/client.js";
 
-setupDatabase();
+setupDatabase(db);
 
 test("persists an author", async () => {
   await db.author.create({ data: { name: "Ada" } });
@@ -36,8 +36,11 @@ test("starts from a clean database — the author above is gone", async () => {
 });
 ```
 
-- **No cleanup code.** Every test starts from the same pristine database — no truncation,
-  no ordering constraints, no leftover rows.
+- **No cleanup code.** Every test starts from an empty database with its sequences
+  rewound — no truncation of your own, no ordering constraints, no leftover rows.
+- **Real commits.** Nothing is wrapped or faked: `$transaction` behaves as in production,
+  and a second client, a queue worker, or a deferred constraint sees exactly what it
+  would there.
 - **Real Postgres.** Not SQLite, not a mock. Your migrations, your constraints, your
   triggers, your `citext` columns.
 - **Parallel by default.** One database per Vitest worker slot, so files running in
@@ -59,12 +62,16 @@ One run of your test suite goes through this lifecycle:
 3. Before any worker forks, one **Worker Database** per Vitest worker slot is cloned from
    the template (`<databaseName>_1..N`) with `CREATE DATABASE … TEMPLATE` — a fast
    file-level copy.
-4. Each worker points `DATABASE_URL` at its own clone and wraps your Prisma client in a
-   routing proxy. Each test opens a transaction, runs inside it, and rolls it back.
-5. The container is removed when the run ends.
+4. Each worker points `DATABASE_URL` at its own clone. Tests commit to it for real.
+5. Before a file's first test, and after every test, the **Reset** empties that clone
+   again: one `DO` block, sent through your own Prisma client, that deletes from every
+   table holding rows and rewinds every sequence that moved.
+6. The container is removed when the run ends.
 
-Migrations run once, clones are cheap, and rollback is instant — so the per-test overhead
-is a `BEGIN`/`ROLLBACK` pair, not a container or a truncation pass.
+Migrations run once, clones are cheap, and the Reset skips empty tables — so the per-test
+overhead is a few milliseconds that track what the test wrote, not how many tables your
+schema has. Why `DELETE` and not `TRUNCATE`, with the benchmark behind it:
+[ADR 0001](docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 ## Requirements
 
@@ -112,8 +119,8 @@ export default defineConfig({
 
 ### 2. Your Prisma client module
 
-The harness assumes your app reaches the database through a single module it can
-intercept. If you already have one, use it as-is.
+Your tests hand the harness the same Prisma client your app uses, so it needs to live in
+one module. If you already have one, use it as-is.
 
 ```ts
 // src/db/client.ts
@@ -132,7 +139,8 @@ export const db = new PrismaClient({ adapter: new PrismaPg({ connectionString })
 The import path follows your own `generator client { output = … }` — adjust it to wherever
 your schema emits the client.
 
-Throwing when `DATABASE_URL` is unset is worth keeping. It is the tripwire for the
+Build the client from `DATABASE_URL`: that is the variable the harness points at this
+worker's database. Throwing when it is unset is worth keeping. It is the tripwire for the
 ordering rule in step 4: if the setup file ever imports your app statically, this throw
 fires loudly instead of silently pointing the suite at your dev database.
 
@@ -149,34 +157,18 @@ export default createGlobalSetup();
 
 ```ts
 // tests/setup.ts
-import { vi } from "vitest";
-
-import { installTestTransaction } from "@flefebvre/prisma-test-helper";
 import { setupWorkerDatabase } from "@flefebvre/prisma-test-helper/setup";
 
-const { databaseUrl, databaseName } = setupWorkerDatabase();
-
-vi.mock("../src/db/client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/db/client.js")>();
-  return { db: installTestTransaction(actual.db, databaseUrl, databaseName) };
-});
-```
-
-The factory returns `{ db }` because the client module above exports only `db`. If yours
-exports anything else — types, a re-exported `Prisma` namespace, helpers — spread the
-original too, or every call site touching one of them fails with Vitest's
-`No "Prisma" export is defined on the "../src/db/client.js" mock`:
-
-```ts
-return { ...actual, db: installTestTransaction(actual.db, databaseUrl, databaseName) };
+setupWorkerDatabase();
 ```
 
 > **This file must keep zero static imports of your app.** ES imports hoist above
 > statements, so a static `import { db } from "../src/db/client.js"` would build the
-> client _before_ `setupWorkerDatabase()` assigns `DATABASE_URL` — pointing your whole
-> suite at your dev database. Reach for app modules through the lazy `vi.mock` factory
-> (as above) or a dynamic `import()`. Library imports are safe: they read no environment
-> at import time.
+> client _before_ `setupWorkerDatabase()` assigns `DATABASE_URL` — pointing it at your dev
+> database. `setupDatabase(db)` refuses to reset a client connected anywhere but this
+> worker's database, so the mistake fails loudly, but it fails every file. If the setup
+> file ever needs an app module, reach for it with a dynamic `import()`. Library imports
+> are safe: they read no environment at import time.
 
 ### 5. Vitest config
 
@@ -197,13 +189,19 @@ export default defineConfig({
 ```
 
 `pool: "forks"` and `isolate: true` are load-bearing. Under `isolate: false` module state
-leaks across files, and the `setupDatabase()` opt-in guard relies on its module
+leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module
 re-instantiating per file.
+
+If you split your config into `projects`, the project that runs database tests must be the
+only `sequence.groupOrder` group, or the first one: as of Vitest 4.1, a later group can
+lease one `VITEST_POOL_ID` to two concurrent forks, which would then share a Worker
+Database.
 
 ## Writing tests
 
-`setupDatabase()` is the opt-in: call it once, at the top of any file that touches the
-database. Files that never call it are untouched by the harness.
+`setupDatabase(db)` is the opt-in: call it once, at the top of any file that touches the
+database, with the client your app uses. Files that never call it are untouched by the
+harness.
 
 ```ts
 // tests/author.test.ts
@@ -212,7 +210,7 @@ import { expect, test } from "vitest";
 import { setupDatabase } from "@flefebvre/prisma-test-helper";
 import { db } from "../src/db/client.js";
 
-setupDatabase();
+setupDatabase(db);
 
 test("persists an author", async () => {
   await db.author.create({ data: { name: "Ada" } });
@@ -220,33 +218,32 @@ test("persists an author", async () => {
 });
 ```
 
-Three rules keep the isolation guarantees intact:
+What to know when writing them:
 
-- **Build test data inside tests, not in `beforeAll`.** `beforeAll` runs before any
-  transaction is open, so writes there would commit to the Worker Database and leak into
-  every later test. The harness throws rather than let that happen.
-- **Per-test cleanup belongs in `afterEach`, registered after `setupDatabase()`.** Vitest
-  runs `afterEach` hooks in reverse registration order, so one your file registers
-  _after_ that call still runs while the transaction is live. Cleanup registered with
-  `onTestFinished` does **not**: the runner fires those after every `afterEach`, so they
-  land past the rollback, where the database is out of reach.
-- **Call `setupDatabase()` once per file.** A second call in the same file fails with
-  `a test transaction is already live`, which does not point at the duplicate call.
+- **Build per-test data in the test, in `beforeEach`, or in a factory.** Writes in your
+  own `beforeAll` are allowed, but they last only until the first test ends: the Reset
+  after that test removes them like any other row.
+- **No cleanup code.** An `afterEach` your file registers _after_ `setupDatabase(db)` still
+  runs before the Reset (Vitest runs `afterEach` hooks in reverse registration order),
+  so it sees the test's rows. `onTestFinished` callbacks run after the Reset: they may
+  read the (empty) database, but rows they write survive into the next test, so keep
+  database writes in `afterEach`.
+- **Finish what you open before the test ends.** Await every query, and end every
+  transaction a second client opened. The Reset waits at most 5 seconds for a lock
+  before failing the test, so a leaked lock is a loud failure, not a hang.
+- **Call `setupDatabase(db)` once per file.** A second call fails with
+  `setupDatabase() was called twice in this file`.
 
-App code that opens its own `$transaction` — nested, batched, or fired concurrently with
-`Promise.all` — works under the harness: each call becomes a savepoint inside the test's
-transaction. One semantic difference from production: all of a test's queries share one
-connection, so `$transaction` calls that would run in parallel on separate connections
-run one after another instead. Independent transactions end with the same results;
-shapes that need true parallelism — a transaction that awaits a concurrent sibling's
-outcome mid-flight, or contention that separate connections would resolve — behave
-differently.
+App code that opens its own `$transaction` — interactive, batched, nested, or fired
+concurrently with `Promise.all` — runs exactly as it does in production: on its own
+connection, committing or rolling back for real. A second `PrismaClient`, a queue worker
+polling a table, or a deferred constraint sees committed rows the way it would there.
 
 ### Fixtures and seeded fake data
 
 `registerResetHook` is the seam for wiring your own fixture and test-data libraries into
-the per-test lifecycle. Hooks run in every `beforeEach` after the transaction opens, and
-receive `{ testName, seed }` — `seed` is a deterministic 32-bit hash of the test name
+the per-test lifecycle. Hooks run in every `beforeEach`, against a database the previous
+Reset already emptied, and receive `{ testName, seed }` — `seed` is a deterministic 32-bit hash of the test name
 alone, so rerunning one test with `-t` hands it the same seed a full-suite run did.
 
 No data-generation library is a dependency of this package; the harness only hands you
@@ -294,38 +291,39 @@ file carries the module augmentation that declares these keys. If it sits outsid
 
 ### `setupWorkerDatabase(): { databaseUrl, databaseName }`
 
-Points this worker at its own Worker Database. Call it at the top of your setup file,
-above the `vi.mock`. It reads what `createGlobalSetup` provided, rewrites the URI onto
-this worker's clone, sets `process.env.DATABASE_URL`, and returns both halves —
-`installTestTransaction` needs both. Exported from
-`@flefebvre/prisma-test-helper/setup`.
+Points this worker at its own Worker Database. Call it from your setup file. It reads what
+`createGlobalSetup` provided, rewrites the URI onto this worker's clone, sets
+`process.env.DATABASE_URL`, and returns both halves for your own use — the harness reads
+them itself. Exported from `@flefebvre/prisma-test-helper/setup`.
 
-### `installTestTransaction(client, databaseUrl, databaseName): client`
+### `setupDatabase(db): void`
 
-Wraps your real Prisma client and returns a routing proxy under the same type. Every
-importer of your client module receives it, so their queries land in whichever test
-transaction is live. Called once per worker, from the `vi.mock` factory.
+Opts a test file into the database. `db` is your Prisma client — typed structurally as
+anything with `$queryRawUnsafe` and `$executeRawUnsafe` (the `ResetClient` type), so the
+package never imports `@prisma/client`. Registers a `beforeAll` that runs the Reset once,
+a `beforeEach` that runs the Reset Hooks, and an `afterEach` that runs the Reset after
+every test.
 
-### `setupDatabase(): void`
-
-Opts a test file into the database. Wraps every test in its own transaction: a
-`beforeEach` opens it and runs the reset hooks, an `afterEach` rolls it back.
+It refuses, before registering anything, unless `DATABASE_URL` names a Worker Database
+(`<databaseName>_<pool id>`), and its `beforeAll` refuses a client connected to any other
+database than that one. With real commits, a misrouted suite would otherwise empty a real
+database.
 
 ### `isDatabaseSetUp(): boolean`
 
-Whether `setupDatabase()` has run in this file. Useful in your own fixture helpers — read
-it to fail loudly when a file forgot to opt in, rather than let them run outside any
-transaction, where their writes would commit.
+Whether `setupDatabase(db)` has run in this file. Useful in your own fixture helpers — read
+it to fail loudly when a file forgot to opt in, rather than let them write rows that no
+Reset clears between that file's tests.
 
 ```ts
 if (!isDatabaseSetUp()) {
-  throw new Error("call setupDatabase() at the top of this test file");
+  throw new Error("call setupDatabase(db) at the top of this test file");
 }
 ```
 
 ### `registerResetHook(hook): void`
 
-Register a callback to run in every `beforeEach`, after the transaction opens (see
+Register a callback to run in every `beforeEach`, before the test body (see
 [Fixtures and seeded fake data](#fixtures-and-seeded-fake-data)). Hooks are held in a
 `Set`, so registering the same function twice runs it once. They run sequentially, in
 registration order, and are awaited.
@@ -334,18 +332,19 @@ registration order, and are awaited.
 
 Every error below comes from this package. Find the one you got.
 
-| Error                                                                   | What is mis-wired                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `The test suite could not reach a container runtime.`                   | Docker is not running. Start it and run the tests again.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ``Could not resolve the `prisma` CLI from <cwd>.``                      | The `prisma` peer dependency is not installed. The harness migrates with your project's own Prisma.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `` `prisma migrate deploy` failed: ``                                   | Your migrations failed to apply; Prisma's own output follows. If it reads `The datasource.url property is required in your Prisma config file`, you are missing the `prisma.config.ts` from step 1.                                                                                                                                                                                                                                                                                                                                    |
-| `cloning the Worker Databases from <name> failed:`                      | `CREATE DATABASE … TEMPLATE` failed — usually another connection to the template, or a Postgres image that does not support the clone.                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `VITEST_POOL_ID is not set —`                                           | `setupWorkerDatabase()` ran outside a Vitest worker. It must run from a file listed in `setupFiles`, with `pool: "forks"` set.                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `No Template Database was provided to this run —`                       | The global setup did not run. Register your global-setup file as `globalSetup: ["tests/global-setup.ts"]`.                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `refusing to open a test transaction on <name> — only Worker Databases` | Your client is pointed at something that is not a Worker Database — **check `<name>` in the message first**. If it is your dev database, the setup file's ordering broke: a static app import ran before `setupWorkerDatabase()` (see step 4). If it is the template, or a near-miss name, the `databaseName` passed to `installTestTransaction` does not match the one `createGlobalSetup` used — pass the value `setupWorkerDatabase()` returned. This guard is the last line stopping a suite from running against a real database. |
-| `no test transaction is installed —`                                    | Your client module was imported without going through the setup file's `vi.mock`. Check the mock path matches the import path your app uses.                                                                                                                                                                                                                                                                                                                                                                                           |
-| `a test transaction is already live —`                                  | `setupDatabase()` was called twice in one file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `the database was touched with no test transaction live —`              | The file never called `setupDatabase()`, or data was built in `beforeAll` instead of inside a test.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Error                                                                 | What is mis-wired                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `The test suite could not reach a container runtime.`                 | Docker is not running. Start it and run the tests again.                                                                                                                                                                                                                                                                                                                      |
+| ``Could not resolve the `prisma` CLI from <cwd>.``                    | The `prisma` peer dependency is not installed. The harness migrates with your project's own Prisma.                                                                                                                                                                                                                                                                           |
+| `` `prisma migrate deploy` failed: ``                                 | Your migrations failed to apply; Prisma's own output follows. If it reads `The datasource.url property is required in your Prisma config file`, you are missing the `prisma.config.ts` from step 1.                                                                                                                                                                           |
+| `cloning the Worker Databases from <name> failed:`                    | `CREATE DATABASE … TEMPLATE` failed — usually another connection to the template, or a Postgres image that does not support the clone.                                                                                                                                                                                                                                        |
+| `VITEST_POOL_ID is not set —`                                         | `setupWorkerDatabase()` ran outside a Vitest worker. It must run from a file listed in `setupFiles`, with `pool: "forks"` set.                                                                                                                                                                                                                                                |
+| `No Template Database was provided to this run —`                     | The global setup did not run. Register your global-setup file as `globalSetup: ["tests/global-setup.ts"]`.                                                                                                                                                                                                                                                                    |
+| `refusing to reset <name> — only Worker Databases`                    | `DATABASE_URL` does not name a Worker Database when `setupDatabase(db)` runs — **check `<name>` in the message first**. Usually the setup file is not registered in `setupFiles`, so `DATABASE_URL` is still your dev one; otherwise something reassigned it after `setupWorkerDatabase()` ran. This guard is the last line stopping the Reset from emptying a real database. |
+| `refusing to reset — no Worker Database is configured for this file.` | `DATABASE_URL` is unset, or the global setup provided no Template Database: register the setup file in `setupFiles` and the global-setup file in `globalSetup`.                                                                                                                                                                                                               |
+| `the client passed to setupDatabase() is connected to <name>, but`    | The client you passed is not on this worker's database. Either the setup file imports your app statically, so the client was built before `DATABASE_URL` was assigned (see step 4), or your client module reads a different variable or a hard-coded URL — build it from `DATABASE_URL`.                                                                                      |
+| `setupDatabase() was called twice in this file`                       | Remove one of the calls; keep the one at the top of the file.                                                                                                                                                                                                                                                                                                                 |
+| `the Reset could not empty <name>:`                                   | Postgres's own message follows. If it is a lock timeout, a connection the test opened still holds a lock — an un-awaited query, or a transaction a second client never ended. Finish both before the test ends.                                                                                                                                                               |
 
 ## AI agent skills
 
@@ -354,7 +353,7 @@ If you use an AI coding agent (Claude Code, Cursor, Codex, …), this repo ships
 | Skill                                                                  | What it does                                                                                                                                                                                                                                                            | Keep it?          |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | [`prisma-test-helper-setup`](skills/prisma-test-helper-setup/SKILL.md) | Wires the harness into a project: installs the package, finds your Prisma client module, scaffolds the five files above (merging existing configs rather than clobbering them), pins the Postgres image from your `docker-compose.yml`, and verifies with a smoke test. | Remove once wired |
-| [`prisma-test-helper`](skills/prisma-test-helper/SKILL.md)             | The rules for writing tests in a wired project: the per-file `setupDatabase()` opt-in, where test data belongs, the Reset Hook seam, and every guard error above with its fix.                                                                                          | Keep installed    |
+| [`prisma-test-helper`](skills/prisma-test-helper/SKILL.md)             | The rules for writing tests in a wired project: the per-file `setupDatabase(db)` opt-in, where test data belongs, the Reset Hook seam, and every guard error above with its fix.                                                                                        | Keep installed    |
 
 ```sh
 # wiring a project for the first time

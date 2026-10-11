@@ -16,7 +16,7 @@ declare module "vitest" {
     templateDatabaseUri: string;
     /**
      * Name of the Template Database the Worker Databases were cloned from. Workers
-     * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Test Transaction
+     * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Worker Database
      * guard derives the shape it admits from it.
      */
     templateDatabaseName: string;

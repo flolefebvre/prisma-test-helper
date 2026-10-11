@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, expect } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, inject } from "vitest";
 
-import { testTransaction } from "./transaction.js";
+import { assertWorkerDatabase, prepareReset, type ResetClient } from "./reset.js";
 
 /** What every Reset Hook receives when it runs. */
 export interface ResetHookContext {
@@ -26,12 +26,11 @@ let databaseSetUp = false;
  * Whether {@link setupDatabase} has run in this test file.
  *
  * Factories read it to fail loudly when a file forgot to opt in, rather than run against
- * an unseeded generator or — worse — outside any Test Transaction, where their writes
- * would commit.
+ * an unseeded generator and write rows that no Reset clears between that file's tests.
  *
  * @example
  * if (!isDatabaseSetUp()) {
- *   throw new Error("call setupDatabase() at the top of this test file");
+ *   throw new Error("call setupDatabase(db) at the top of this test file");
  * }
  */
 export function isDatabaseSetUp(): boolean {
@@ -41,7 +40,8 @@ export function isDatabaseSetUp(): boolean {
 const resetHooks = new Set<ResetHook>();
 
 /**
- * Register a callback to run in every `beforeEach`, after the Test Transaction opens.
+ * Register a callback to run in every `beforeEach`, before the test body, against a
+ * database the previous Reset already emptied.
  *
  * This is the seam factories plug into: reset a per-test sequence counter, seed faker
  * from `seed`, or anything else that must be fresh per test. Hooks are held in a Set, so
@@ -59,34 +59,75 @@ export function registerResetHook(hook: ResetHook): void {
 }
 
 /**
- * Opt a test file into the database. Call it once, at the top of the file.
+ * Opt a test file into the database. Call it once, at the top of the file, with the
+ * Prisma client your app uses.
  *
- * Wraps every test in its own Test Transaction: a `beforeEach` opens it and runs the
- * Reset Hooks; an `afterEach` rolls it back, discarding every write — the Worker
- * Database itself never changes, so each test starts from the same pristine clone.
+ * Tests commit for real; the Reset returns the Worker Database to empty around them. A
+ * `beforeAll` runs it once, so the file starts clean whatever an earlier file on this
+ * worker left behind, and an `afterEach` runs it after every test. A `beforeEach` runs
+ * the Reset Hooks.
+ *
+ * It refuses — synchronously, before registering anything — unless `DATABASE_URL` names
+ * a Worker Database: with real commits, a misrouted suite would empty a real database.
+ * The `beforeAll` also checks that `db` is connected to that same database before the
+ * first Reset.
  *
  * Vitest runs `afterEach` hooks in reverse registration order (`sequence.hooks:
- * "stack"`, the default), so an `afterEach` your file registers *after* this call — or
- * one inside a nested `describe` — still runs while the transaction is live. Cleanup
- * registered with `onTestFinished` does *not*: the runner fires those after every
- * `afterEach`, so they land past the rollback, where the database is out of reach.
+ * "stack"`, the default), so an `afterEach` your file registers *after* this call still
+ * sees the test's rows. `onTestFinished` callbacks run after the Reset, so rows they
+ * write survive into the next test. Writes in a `beforeAll` of your own are allowed but
+ * last only until the first test's Reset.
  *
  * @example
  * import { setupDatabase } from "@flefebvre/prisma-test-helper";
  * import { db } from "../src/db/client.js";
  *
- * setupDatabase();
+ * setupDatabase(db);
  *
  * test("persists an author", async () => {
  *   await db.author.create({ data: { name: "Ada" } });
  *   expect(await db.author.count()).toBe(1);
  * });
  */
-export function setupDatabase(): void {
+export function setupDatabase(db: ResetClient): void {
+  // Typed as `string`, but `inject` is a plain lookup in the context the main process
+  // provided: an unregistered globalSetup yields `undefined` at runtime, not an error.
+  const templateName = inject("templateDatabaseName") as string | undefined;
+  registerDatabase(db, process.env.DATABASE_URL, templateName);
+}
+
+/**
+ * {@link setupDatabase} with its two environment reads made explicit, so the lifecycle
+ * can be unit-tested without a provided context. Internal: not on the package root.
+ */
+export function registerDatabase(
+  db: ResetClient,
+  databaseUrl: string | undefined,
+  templateName: string | undefined,
+): void {
+  if (databaseSetUp) {
+    throw new Error(
+      "setupDatabase() was called twice in this file — call it once, at the top of the file",
+    );
+  }
+  if (!databaseUrl || !templateName) {
+    throw new Error(
+      "refusing to reset — no Worker Database is configured for this file. " +
+        "`setupWorkerDatabase()` must run from a file listed in `setupFiles`, and the " +
+        "global-setup file exporting `createGlobalSetup()` must be listed in `globalSetup`.",
+    );
+  }
+  assertWorkerDatabase(databaseUrl, templateName);
   databaseSetUp = true;
 
+  let reset: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    reset = await prepareReset(db, databaseUrl, templateName);
+    await reset();
+  });
+
   beforeEach(async () => {
-    await testTransaction().start();
     const testName = expect.getState().currentTestName ?? "";
     const seed = hashName(testName);
     // Sequential, not Promise.all: hooks reset shared per-test state, and the order they
@@ -95,7 +136,9 @@ export function setupDatabase(): void {
   });
 
   afterEach(async () => {
-    await testTransaction().rollback();
+    // Unset only when the `beforeAll` failed — which Vitest has already reported, and
+    // which skipped every test, so there is nothing to reset.
+    await reset?.();
   });
 }
 

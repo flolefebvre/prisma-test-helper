@@ -161,7 +161,7 @@ describe("createGlobalSetup", () => {
   });
 
   // The Template Database name has to cross the process boundary alongside the URI:
-  // the worker rewrites the URI path from it, and `installTestTransaction` derives the
+  // the worker rewrites the URI path from it, and `setupDatabase` derives the
   // `<databaseName>_<pool id>` guard pattern from it.
   test("provides the Template Database name to the run", async () => {
     const { project } = await runSetup();
