@@ -27,7 +27,7 @@ test("persists an author", async () => {
 });
 ```
 
-The Reset is the cleanup. It deletes from every table holding rows and rewinds every sequence that moved, so each test starts from an empty Worker Database with ids back at 1 — no truncation of your own, no ordering constraints, no leftover rows. Files that never call `setupDatabase(db)` register no hooks and are free to skip the database entirely.
+The Reset is the cleanup. It empties every table and rewinds every sequence in one statement, so each test starts from an empty Worker Database with ids back at 1 — no truncation of your own, no ordering constraints, no leftover rows. Files that never call `setupDatabase(db)` register no hooks and are free to skip the database entirely.
 
 Import the client the way the rest of the project does — the relative `.js` specifier above suits an ESM project, while a Next.js or Vite app typically writes an alias (`import { db } from "@/lib/db"`). Pass `setupDatabase` that same client: the Reset runs through it.
 

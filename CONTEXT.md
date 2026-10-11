@@ -21,9 +21,9 @@ commit to it for real. The only kind of database the Reset may empty.
 
 **Reset**:
 The pass that returns a Worker Database to empty: one PL/pgSQL `DO` block, sent through
-the consumer's own Prisma client, that deletes from every table holding rows and rewinds
-every owned sequence that moved. Runs once before a file's first test and after every
-test. Built once per file from a catalog discovery query.
+the consumer's own Prisma client, that empties every table and rewinds every owned
+sequence in one statement. Runs once before a file's first test and after every test.
+Built once per file from a catalog discovery query.
 _Avoid_: truncation, cleanup, wipe
 
 **Reset Hook**:

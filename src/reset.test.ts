@@ -55,7 +55,7 @@ describe("assertWorkerDatabase", () => {
 
 describe("buildResetStatement", () => {
   const author = { schema: "public", name: "Author" };
-  const authorSeq = { schema: "public", name: "Author_id_seq" };
+  const authorSeq = { schema: "public", name: "Author_id_seq", startValue: "1" };
 
   test("is one DO block that relaxes FK triggers and bounds lock waits, both locally", () => {
     const statement = buildResetStatement([author], [authorSeq]);
@@ -68,48 +68,56 @@ describe("buildResetStatement", () => {
     expect(statement).toContain("PERFORM pg_catalog.set_config('lock_timeout', '5s', true);");
   });
 
-  test("probes each table and deletes only when it holds rows, quoting via %I", () => {
-    const statement = buildResetStatement([author, { schema: "billing", name: "order" }], []);
-
-    expect(statement).toContain(
-      "EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I.%I)', 'public', 'Author') INTO nonempty;\n" +
-        "  IF nonempty THEN EXECUTE format('DELETE FROM %I.%I', 'public', 'Author'); END IF;",
-    );
-    expect(statement).toContain("format('DELETE FROM %I.%I', 'billing', 'order')");
-  });
-
-  test("doubles single quotes, so a name cannot end its literal early", () => {
-    const statement = buildResetStatement([{ schema: "public", name: "it's" }], []);
-
-    expect(statement).toContain("'public', 'it''s'");
-    expect(statement).not.toContain("'it's'");
-  });
-
-  test("rewinds only owned sequences that moved, to their own start value", () => {
+  test("empties every table and rewinds every sequence in one EXECUTE, without probing", () => {
     const statement = buildResetStatement(
-      [author],
-      [authorSeq, { schema: "public", name: "Post_id_seq" }],
+      [author, { schema: "billing", name: "order" }],
+      [authorSeq, { schema: "billing", name: "order_id_seq", startValue: "1000" }],
     );
 
     expect(statement).toContain(
-      "WHERE last_value IS NOT NULL AND (schemaname, sequencename) IN " +
-        "(('public', 'Author_id_seq'), ('public', 'Post_id_seq'))",
+      "  EXECUTE $reset_sql$" +
+        'WITH d0 AS (DELETE FROM "public"."Author"), d1 AS (DELETE FROM "billing"."order") ' +
+        'SELECT pg_catalog.setval(\'"public"."Author_id_seq"\'::regclass, 1, false), ' +
+        'pg_catalog.setval(\'"billing"."order_id_seq"\'::regclass, 1000, false)' +
+        "$reset_sql$;",
     );
-    expect(statement).toContain("seq.start_value, false);");
+    expect(statement.match(/EXECUTE /g)).toHaveLength(1);
+    expect(statement).not.toContain("EXISTS");
   });
 
-  test("omits the sequence pass when no sequence is owned", () => {
-    expect(buildResetStatement([author], [])).not.toContain("pg_sequences");
+  test("quotes identifiers, doubling embedded double quotes", () => {
+    const statement = buildResetStatement([{ schema: "public", name: 'it\'s "odd"' }], []);
+
+    expect(statement).toContain('DELETE FROM "public"."it\'s ""odd"""');
   });
 
-  test("stays a valid block for an empty schema", () => {
+  test("a sequence with no table still gets its rewind, and a table with no sequence its delete", () => {
+    expect(buildResetStatement([], [authorSeq])).toContain(
+      "EXECUTE $reset_sql$SELECT pg_catalog.setval(",
+    );
+    expect(buildResetStatement([author], [])).toContain(
+      'EXECUTE $reset_sql$WITH d0 AS (DELETE FROM "public"."Author") SELECT 1$reset_sql$;',
+    );
+  });
+
+  test("stays a valid block for an empty schema, executing nothing", () => {
     expect(buildResetStatement([], [])).toMatch(/BEGIN\n(.*\n){2}END\n\$reset\$$/);
+    expect(buildResetStatement([], [])).not.toContain("EXECUTE");
   });
 
-  test("refuses a name containing its dollar-quote tag", () => {
+  test("refuses a name containing either dollar-quote tag", () => {
     expect(() => buildResetStatement([{ schema: "public", name: "a$reset$b" }], [])).toThrow(
       "contains $reset$",
     );
+    expect(() =>
+      buildResetStatement([], [{ schema: "public", name: "a$reset_sql$b", startValue: "1" }]),
+    ).toThrow("contains $reset_sql$");
+  });
+
+  test("refuses a start value that is not an integer, so nothing but a number is inlined", () => {
+    expect(() =>
+      buildResetStatement([], [{ ...authorSeq, startValue: "1; DROP TABLE x" }]),
+    ).toThrow("has start value 1; DROP TABLE x");
   });
 });
 
@@ -151,8 +159,8 @@ describe("prepareReset", () => {
 
   test("builds the statement from discovery once and sends it per Reset", async () => {
     const { client, queries, executed } = stubClient("prisma_test_1", [
-      { kind: "table", schema: "public", name: "Author" },
-      { kind: "sequence", schema: "public", name: "Author_id_seq" },
+      { kind: "table", schema: "public", name: "Author", start_value: null },
+      { kind: "sequence", schema: "public", name: "Author_id_seq", start_value: "7" },
     ]);
 
     const reset = await prepareReset(client, WORKER_URL, "prisma_test");
@@ -163,7 +171,7 @@ describe("prepareReset", () => {
     expect(executed).toEqual([
       buildResetStatement(
         [{ schema: "public", name: "Author" }],
-        [{ schema: "public", name: "Author_id_seq" }],
+        [{ schema: "public", name: "Author_id_seq", startValue: "7" }],
       ),
       executed[0],
     ]);

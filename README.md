@@ -64,13 +64,14 @@ One run of your test suite goes through this lifecycle:
    file-level copy.
 4. Each worker points `DATABASE_URL` at its own clone. Tests commit to it for real.
 5. Before a file's first test, and after every test, the **Reset** empties that clone
-   again: one `DO` block, sent through your own Prisma client, that deletes from every
-   table holding rows and rewinds every sequence that moved.
+   again: one `DO` block, sent through your own Prisma client, that empties every table
+   and rewinds every sequence in a single statement.
 6. The container is removed when the run ends.
 
-Migrations run once, clones are cheap, and the Reset skips empty tables — so the per-test
-overhead is a few milliseconds that track what the test wrote, not how many tables your
-schema has. Why `DELETE` and not `TRUNCATE`, with the benchmark behind it:
+Migrations run once, clones are cheap, and the Reset is one planned statement — so the
+per-test overhead is a few milliseconds (about 5 ms at 73 tables, 9 ms with 20 workers
+resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
+`TRUNCATE`, with the benchmark behind it:
 [ADR 0001](docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 ## Requirements
