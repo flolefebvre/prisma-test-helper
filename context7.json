@@ -27,5 +27,5 @@
     "Test data factories live in the consumer project, not in the harness. They plug in through the Reset Hook, which receives { testName, seed } for deterministic seeding.",
     "Docker must be available at test time; Testcontainers starts and removes the container automatically, including after a crash."
   ],
-  "previousVersions": [{ "tag": "v0.1.0" }]
+  "previousVersions": [{ "tag": "v0.3.0" }, { "tag": "v0.1.0" }]
 }
