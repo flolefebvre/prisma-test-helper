@@ -27,7 +27,9 @@ test("starts from a clean database: the author above is gone", async () => {
 The **Reset** is the cleanup. Before a file's first test and after every test, it empties
 every table and rewinds every sequence in one statement, so each test starts from an
 empty Worker Database with ids back at 1: no truncation of your own, no ordering
-constraints, no leftover rows.
+constraints, no leftover rows. That includes rows your migrations inserted: every table
+but `_prisma_migrations` is emptied, so reference data the tests need belongs in a
+[Reset Hook](#fixtures-and-seeded-fake-data).
 
 Import the client the way the rest of the project does. The relative `.js` specifier
 above suits an ESM project, while a Next.js or Vite app typically writes an alias
