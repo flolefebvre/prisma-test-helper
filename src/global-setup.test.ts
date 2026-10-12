@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { beforeEach, describe, expect, test, vi, type Mock } from "vitest";
 import type { TestProject } from "vitest/node";
 
-import { cloneCommand, createGlobalSetup, workerCount } from "./global-setup.js";
+import { createGlobalSetup } from "./global-setup.js";
+import { cloneCommand } from "./worker-database.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -70,50 +71,6 @@ async function runSetup(
   const teardown = await createGlobalSetup(options)(project);
   return { teardown, project };
 }
-
-// `cloneCommand` is the pure half of Worker Database provisioning: one psql argv
-// that clones every worker slot in a single container exec.
-
-describe("cloneCommand", () => {
-  test("carries one CREATE DATABASE … TEMPLATE per worker slot", () => {
-    const argv = cloneCommand("prisma_test", "test", 3);
-
-    expect(argv.filter((flag) => flag === "--command")).toHaveLength(3);
-    expect(argv.filter((arg) => arg.startsWith("CREATE DATABASE"))).toEqual([
-      'CREATE DATABASE "prisma_test_1" TEMPLATE "prisma_test"',
-      'CREATE DATABASE "prisma_test_2" TEMPLATE "prisma_test"',
-      'CREATE DATABASE "prisma_test_3" TEMPLATE "prisma_test"',
-    ]);
-  });
-
-  test("derives clone names from the configured database name", () => {
-    const argv = cloneCommand("acme_test", "postgres", 1);
-
-    expect(argv).toContain('CREATE DATABASE "acme_test_1" TEMPLATE "acme_test"');
-  });
-
-  test("stops at the first error, so a failed clone fails the exec", () => {
-    const argv = cloneCommand("prisma_test", "test", 1);
-
-    const flagIndex = argv.indexOf("--set");
-    expect(flagIndex).toBeGreaterThan(-1);
-    expect(argv[flagIndex + 1]).toBe("ON_ERROR_STOP=1");
-  });
-});
-
-// Vitest resolves `maxWorkers` with a truthy check, so `0` means "unset" and a real
-// worker count is derived. `workerCount` must mirror that: treating `0` as literal
-// would provision zero databases while Vitest still forks workers.
-
-describe("workerCount", () => {
-  test("passes an explicit maxWorkers through", () => {
-    expect(workerCount(projectWith(4))).toBe(4);
-  });
-
-  test("treats 0 as unset, like Vitest, and derives a positive count", () => {
-    expect(workerCount(projectWith(0))).toBeGreaterThan(0);
-  });
-});
 
 describe("createGlobalSetup", () => {
   test("defaults to postgres:17-alpine and a prisma_test Template Database", async () => {
