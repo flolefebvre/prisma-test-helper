@@ -55,7 +55,7 @@ export function setupWorkerDatabase(): WorkerDatabase {
       "No Template Database was provided to this run — @flefebvre/prisma-test-helper's " +
         "global setup did not run. Add a global-setup file exporting " +
         "`createGlobalSetup()` and register it in your Vitest config as " +
-        '`globalSetup: ["test/global-setup.ts"]`.',
+        '`globalSetup: ["tests/global-setup.ts"]`.',
     );
   }
 
