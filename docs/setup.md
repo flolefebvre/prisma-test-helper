@@ -22,8 +22,8 @@ Confirm every requirement before touching a file:
   check in [step 6](#6-prove-it-works) cannot run until Docker is started.
 - A Postgres superuser. The Reset sets `session_replication_role` and reads `pg_stat_file`
   and `pg_stat_activity`, which need one. The container the harness starts connects as
-  its superuser, so there is nothing to do. Any future way to point the harness at
-  another server must keep a superuser role; the why is in
+  its superuser, so there is nothing to do. The harness needs this of any server it runs
+  against; the why is in
   [ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 **A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the
@@ -50,7 +50,7 @@ not add them to your project.
 **pnpm build scripts.** Through testcontainers, the install pulls in `cpu-features`,
 `ssh2` and `protobufjs`, which carry build scripts. The harness runs with all three
 unbuilt, so nothing from this package needs approving. pnpm 10 skips their scripts with a
-warning; pnpm 11 fails the install with `ERR_PNPM_IGNORED_BUILDS` until they are listed.
+warning; pnpm 11 and later fail the install with `ERR_PNPM_IGNORED_BUILDS` until they are listed.
 List them as `false` in `pnpm-workspace.yaml` (pnpm before 10.26 does not know
 `allowBuilds`: put them under `ignoredBuiltDependencies` instead):
 

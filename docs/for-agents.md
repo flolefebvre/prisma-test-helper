@@ -68,17 +68,17 @@ for files that already exist.
    requirement before touching a file; on too-old versions, stop. A CommonJS project is
    fine. See [Before you start](setup.md#before-you-start).
 2. **Install** `@flefebvre/prisma-test-helper` as a dev dependency with the package
-   manager the lockfile names. Never add `testcontainers` yourself. Under pnpm, list
-   `cpu-features`, `ssh2` and `protobufjs` as `false` in `allowBuilds`. See
+   manager the lockfile names. Never add `testcontainers` yourself. Under pnpm, mark
+   `cpu-features`, `ssh2` and `protobufjs` as not to be built, with the entries in
    [Before you start](setup.md#before-you-start).
 3. **Locate the Prisma client module** and record its path and export name. Several
    candidates → ask the user which one the app imports. None → create one. A module that
    does not read `DATABASE_URL` → tell the user and change it with their agreement. An
    existing module without the `DATABASE_URL is not set` throw → offer to add it, and add
    it only if the user agrees. If a database-free command imports the module (`next build`,
-   say), use the throw-on-first-use variant instead: see
-   [Database-free commands](setup.md#database-free-commands). See
-   [Your Prisma client module](setup.md#2-your-prisma-client-module).
+   say), use the throw-on-first-use variant instead. See
+   [Your Prisma client module](setup.md#2-your-prisma-client-module) and, for that case,
+   [Database-free commands](setup.md#database-free-commands).
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).
 5. **Write the global-setup file**, pinning `image` from the project's compose file when
