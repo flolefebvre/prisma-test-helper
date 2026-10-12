@@ -149,6 +149,8 @@ test("persists an author", async () => {
 - [Troubleshooting](docs/troubleshooting.md): every error, what is mis-wired, and where
   the fix lives.
 - [For AI coding agents](docs/for-agents.md): the rules, setup steps and a by-task guide.
+- [Migrating](docs/migrating.md): upgrade notes per major version. The package follows
+  semver, so breaking changes land only in major versions.
 
 These pages ship inside the package, so they always match the version you have installed:
 `node_modules/@flefebvre/prisma-test-helper/docs/`.
