@@ -1,6 +1,11 @@
-import { afterEach, beforeAll, beforeEach, expect, inject } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, inject } from "vitest";
 
-import { assertWorkerDatabase, prepareReset, type ResetClient } from "./reset.js";
+import {
+  assertWorkerDatabase,
+  prepareReset,
+  type PreparedReset,
+  type ResetClient,
+} from "./reset.js";
 
 /** What every Reset Hook receives when it runs. */
 export interface ResetHookContext {
@@ -65,7 +70,8 @@ export function registerResetHook(hook: ResetHook): void {
  * Tests commit for real; the Reset returns the Worker Database to empty around them. A
  * `beforeAll` runs it once, so the file starts clean whatever an earlier file on this
  * worker left behind, and an `afterEach` runs it after every test. A `beforeEach` runs
- * the Reset Hooks.
+ * the Reset Hooks. An `afterAll` vacuums the tables the file wrote to, which keeps the
+ * next file's first Reset cheap; it is best effort and never fails the file.
  *
  * It refuses — synchronously, before registering anything — unless `DATABASE_URL` names
  * a Worker Database: with real commits, a misrouted suite would empty a real database.
@@ -120,11 +126,11 @@ export function registerDatabase(
   assertWorkerDatabase(databaseUrl, templateName);
   databaseSetUp = true;
 
-  let reset: (() => Promise<void>) | undefined;
+  let prepared: PreparedReset | undefined;
 
   beforeAll(async () => {
-    reset = await prepareReset(db, databaseUrl, templateName);
-    await reset();
+    prepared = await prepareReset(db, databaseUrl, templateName);
+    await prepared.reset();
   });
 
   beforeEach(async () => {
@@ -138,7 +144,13 @@ export function registerDatabase(
   afterEach(async () => {
     // Unset only when the `beforeAll` failed — which Vitest has already reported, and
     // which skipped every test, so there is nothing to reset.
-    await reset?.();
+    await prepared?.reset();
+  });
+
+  afterAll(async () => {
+    // Returns the heaps this file wrote to 0 bytes, so the next file's first Reset on a
+    // fresh backend skips those tables unopened. Never rejects; unset as above.
+    await prepared?.vacuum();
   });
 }
 

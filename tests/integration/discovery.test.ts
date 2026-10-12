@@ -52,15 +52,17 @@ test("discovers parents, not partitions, and skips migrations and extension tabl
   const relations = await query<DiscoveredRelation>(DISCOVERY_QUERY);
   const fixture = relations
     .filter((relation) => relation.schema === "Reset Fixture")
-    .map((relation) => `${relation.kind} ${relation.name}`);
+    .map((relation) => `${relation.kind} ${relation.relkind} ${relation.name}`);
 
+  // The relkind tells the Reset which tables it cannot probe: a partitioned parent (`p`)
+  // has no file of its own.
   expect(fixture).toEqual([
-    'sequence it\'s "odd"_id_seq',
-    "sequence measurement_id_seq",
-    "sequence order_id_seq",
-    'table it\'s "odd"',
-    "table measurement",
-    "table order",
+    'sequence S it\'s "odd"_id_seq',
+    "sequence S measurement_id_seq",
+    "sequence S order_id_seq",
+    'table r it\'s "odd"',
+    "table p measurement",
+    "table r order",
   ]);
   expect(relations.map((relation) => relation.name)).not.toContain("_prisma_migrations");
 });
@@ -74,7 +76,7 @@ test("the Reset empties every discovered table and rewinds every owned sequence"
   await query(`SELECT nextval('${SCHEMA}.standalone')`);
 
   // Act
-  const reset = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
+  const { reset } = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
   await reset();
 
   // Assert: empty, partitions included, and the next ids start over.

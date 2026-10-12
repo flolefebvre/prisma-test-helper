@@ -48,8 +48,9 @@ database to empty around them with the **Reset**:
     test loudly instead of hanging it;
   - runs **one** `EXECUTE` of a single SQL statement: a data-modifying CTE per table
     (`WITH d0 AS (DELETE FROM …), d1 AS (…), …`) and a final `SELECT` that rewinds every
-    column-owned sequence to its own `start_value` with `setval(…, false)`. Nothing is
-    probed first — see the amendment below for why.
+    column-owned sequence to its own `start_value` with `setval(…, false)`. Amendment 1
+    explains why no table is probed with `EXISTS`; amendment 2 keeps only the `DELETE`s
+    of tables whose heap file is not 0 bytes, and adds a `VACUUM` between files.
 - Discovery covers every ordinary and partitioned table in every non-system schema. It
   leaves out `_prisma_migrations`, partitions (deleting from their parent reaches them),
   temporary tables, and extension-owned tables such as PostGIS's `spatial_ref_sys`.
@@ -163,3 +164,182 @@ What the numbers say:
 The Reset is therefore one `EXECUTE` of `WITH d0 AS (DELETE FROM …), … SELECT setval(…),
 …`, inside the same `DO` block (still needed for the two transaction-local settings, and
 still one round trip). Everything else in this decision stands.
+
+## Amendment 2026-10-12 — a storage probe, and a `VACUUM` between files
+
+Issue #17: the first Reset on a fresh Postgres backend cost about 85–95 ms at 73 tables,
+against about 5 ms warm. Every test file pays it at least once: the `beforeAll` Reset is
+the first statement on its connection, and the first `afterEach` Reset often lands on
+another new pool backend. Most of that cost is not deleting. To plan a `DELETE`, a
+backend first builds the relcache entry of the table and its indexes, and a fresh
+backend has none. Planning the 73 `DELETE`s took about 71 ms cold, the 73 `setval`s about
+17 ms, and the empty block about 2 ms.
+
+### Decision
+
+- **The Reset deletes only from tables whose heap file is not 0 bytes.** Inside the `DO`
+  block, one query filters the candidate list with
+  `coalesce((pg_stat_file(pg_relation_filepath(rel), true)).size, 1) > 0` and aggregates
+  the pre-quoted `DELETE` CTEs of the tables it keeps. A single `EXECUTE` then runs those
+  and the `setval`s, as before. `pg_stat_file` costs one `stat()` and never opens the
+  relation, so a table that is skipped gets no relcache entry.
+  - A NULL or missing size counts as dirty: the probe can over-delete, never skip.
+  - The candidate array is filtered directly, never joined to `pg_class`. Joined, the
+    planner runs the probe on every relation in the database (32 ms cold and 4 ms warm in
+    the review).
+  - **Partitioned parents** (`relkind = 'p'`, now carried by discovery) have no file of
+    their own, so their `DELETE` is emitted unconditionally.
+  - **Sequences are always rewound.** A failed insert advances a sequence and leaves its
+    table's file at 0 bytes, so the table probe cannot gate them.
+  - **Relations are resolved by name at Reset time, with `to_regclass`.** A path cached at
+    discovery would go stale, since `TRUNCATE` and `VACUUM FULL` give a table a new file.
+    OIDs from discovery would be about 0.5–1 ms cheaper warm, and a dropped table is not
+    the problem: its OID no longer resolves, the size comes back NULL, and the table counts
+    as dirty. The problem is that a dropped table's OID can be **reused** by another
+    relation (an index, a TOAST table, another table). If that relation's file is empty,
+    the probe would skip a table that holds rows. `to_regclass` keeps the name-based
+    behaviour the Reset always had: a table dropped and recreated under the same name is
+    found again.
+  - Quoting stays JS-side: `buildResetStatement` is still pure and unit-tested, and its
+    dollar-tag check covers every emitted fragment.
+- **`setupDatabase` registers an `afterAll` that vacuums the tables whose heap file is
+  not 0 bytes**, using the same probe, with `VACUUM (SKIP_LOCKED) <those tables>` through
+  the consumer's client. A `DELETE` leaves its pages behind, and only a `VACUUM` truncates
+  an emptied heap back to 0 bytes. Without one, every table any earlier file wrote stays a
+  candidate, and the probe decays to the cost of the plain Reset over a run.
+  - **It is best effort.** It never rejects, and a failure only makes the next file's first
+    Reset slower. The Reset is correct without it.
+  - When nothing is dirty it sends nothing, since a bare `VACUUM` processes the whole
+    database. `SKIP_LOCKED` passes over any table whose lock is not free at once.
+  - **It stands down while another client session of this database has a transaction
+    open**: a `pg_stat_activity` row with the same `datname`, another `pid`, a
+    `backend_type` of `client backend`, and `xact_start` set. Truncating a heap needs
+    `ACCESS EXCLUSIVE`, which `VACUUM` takes only conditionally. Against a lock that a
+    connection the file leaked still holds, it retries for about 5 s and then gives up
+    (measured below).
+  - With Vitest's default `sequence.hooks: "stack"`, it runs after the file's own
+    `afterAll` hooks. It changes storage and `pg_class` statistics, not rows or schema,
+    and runs when no test is active, so the concurrency stance of this decision is
+    untouched.
+- **Superuser is now required twice over.** `session_replication_role` already needed it.
+  `pg_stat_file` needs it too (or `pg_read_server_files`), and so does reading other
+  sessions' `xact_start` in `pg_stat_activity` (or `pg_read_all_stats`). The container
+  `createGlobalSetup` starts runs as its superuser, so nothing changes for consumers. An
+  image or role without those rights would make the Reset fail on `pg_stat_file`, loudly.
+
+### Measurements
+
+[`0001-bench/bench4.mjs`](0001-bench/bench4.mjs) uses the same container as bench3
+(`postgres:18-alpine`, tmpfs, `fsync=off`), on WSL2 with 20 cores.
+
+- **Schema:** generated, 73 tables. 72 are ordinary tables in an FK chain, each with a
+  primary key and 4 secondary indexes. One is a partitioned parent with two partitions.
+- **Concurrency:** W Worker Databases are driven at once.
+- **Cold:** the Reset as the first statement on a new backend, with connecting excluded,
+  medians over 12 backends per worker at W = 1 and 6 at W = 20.
+- **Warm:** one backend, with a test's writes (10 rows into 8 tables) between Resets.
+
+"Before" is bench4's `shipped`, pointed through `RESET_JS` at the Reset before this
+amendment. "Probe" is `probe_regclass`, pointed through `PROBE_JS` at the package's own
+build with this amendment, so it runs exactly the Reset statement and vacuum query the
+package now emits. The OID column is bench4's inline `probe_oid`. The two builds and the
+runs, from bench4's scratch directory (ranges span two runs of each):
+
+```
+# Before: src/reset.ts as of ad46371, compiled on its own
+git -C <repo> show ad46371:src/reset.ts > old/reset.ts
+<repo>/node_modules/.bin/tsc --target es2022 --module nodenext \
+  --moduleResolution nodenext --outDir old old/reset.ts
+# Probe: the package with this amendment
+pnpm -C <repo> build
+
+RESET_JS=$PWD/old/reset.js PROBE_JS=<repo>/dist/reset.js node bench4.mjs 5433 1 12
+RESET_JS=$PWD/old/reset.js PROBE_JS=<repo>/dist/reset.js node bench4.mjs 5433 20 6
+```
+
+Cold Reset, ms:
+
+| State of the Worker Database               | W   | Before  | Probe   | Probe, OIDs |
+| ------------------------------------------ | --- | ------- | ------- | ----------- |
+| Pristine clone (every heap 0 bytes)        | 1   | 91–98   | 23–36   | 25–34       |
+| Mid-file: 8 tables written and emptied     | 1   | 95–122  | 29–31   | 31–38       |
+| Late in a run, no `VACUUM` ever: 72 tables | 1   | 98–99   | 94–110  | 97–105      |
+| That late state after a `VACUUM`           | 1   | 81–91   | 23–32   | 22–27       |
+| Pristine clone                             | 20  | 143–178 | 32–34   | 29–31       |
+| Mid-file                                   | 20  | 128–152 | 41–42   | 37–39       |
+| Late in a run, no `VACUUM` ever            | 20  | 131–133 | 131–140 | 128–131     |
+| After a `VACUUM`                           | 20  | 111–119 | 31–33   | 28–31       |
+
+The `afterAll` (probe plus `VACUUM`) took 11–13 ms at W = 1 and 19–20 ms at W = 20
+with 8 dirty tables. With all 72 dirty it took 57–61 ms and 85–92 ms. Every heap was
+back to 0 bytes afterwards, in every run.
+
+**Per file** = the `beforeAll` Reset + the first `afterEach` Reset (mid-file, on a
+backend that may be new too) + the `afterAll`, ms:
+
+| File starts                    | W   | Before  | Probe + `VACUUM` |
+| ------------------------------ | --- | ------- | ---------------- |
+| On a pristine clone            | 1   | 186–220 | 65–78            |
+| After the previous file's run  | 1   | 176–213 | 65–74            |
+| Late, no `VACUUM` ever (worst) | 1   | 195–198 | 188–221          |
+| On a pristine clone            | 20  | 295–306 | 93–95            |
+| After the previous file's run  | 20  | 247–263 | 92–93            |
+| Late, no `VACUUM` ever (worst) | 20  | 262–266 | 263–280          |
+
+The worst case is the probe with every heap dirty and no `VACUUM`, which is what a
+`VACUUM` that keeps failing would leave behind. It stays at parity with the old Reset,
+within the spread of the samples.
+
+**The warm Reset is slower.** The probe runs on every Reset, and on a warm backend it saves
+almost nothing. Measured with the variants interleaved three times in one process:
+
+```
+# same RESET_JS and PROBE_JS as above; the three variants listed three times over
+WARM=300 SECTIONS=warm node bench4.mjs 5433 1 1 shipped probe_regclass probe_oid … (×3)
+SECTIONS=warm node bench4.mjs 5433 20 1 shipped probe_regclass probe_oid … (×3)
+```
+
+| W   | Before          | Probe              | Probe, OIDs |
+| --- | --------------- | ------------------ | ----------- |
+| 1   | 4.5 / 4.8 / 4.8 | 6.3 / 6.7 / 6.7    | 5.2–5.4     |
+| 20  | 8.1 / 8.3 / 8.8 | 10.0 / 10.0 / 10.0 | 9.0–9.4     |
+
+That is about **+1.9 ms per test at one worker (+40%) and +1.7 ms at 20 (+20%)**,
+against a per-file saving of about 130 ms and 205 ms. A file comes out ahead up to
+about **70 tests at one worker and 120 at 20**. The pre-implementation gate run, with
+bench4's inline statement on another day, measured +1.4 ms (+30% and +18%) and
+break-evens of about 75 and 125. The figures above are the ones that count, because they
+time the statement the package ships. The criterion for this change is therefore the
+cost per file, not "the warm Reset does not get slower". It does, and the maintainer
+accepted that trade.
+
+Leaked lock (bench4's `lock` section, on worker 1, in each of the four runs above): with
+another session holding `ACCESS SHARE` on a dirty table in an open transaction, an
+unguarded `VACUUM` of 8 tables took 5.16–5.19 s and left that heap nonzero. Guarded, the
+`afterAll` took 6.5–7.3 ms and vacuumed nothing.
+
+### Rejected
+
+- **Probing with `pg_relation_size`.** It opens every relation, which is the very cost
+  being avoided: 147 ms cold for the probe alone.
+- **Pre-warming a backend.** The `beforeAll` Reset is already the first statement on its
+  connection, and the library does not own the app's pool, so there is nothing to warm off
+  the critical path.
+- **Insert-tracking triggers.** They modify the consumer's schema, tax every insert,
+  need their own reset, and say nothing the heap size does not.
+- **A connection pooler in front of the container.** That means a second process, plus
+  Prisma's interactions with pooling modes. #22 gets backends reused without
+  infrastructure.
+- **Statistics probes** (`pg_stat_user_tables`). Other backends flush their counters
+  lazily, so a fresh backend can read a written table as clean.
+- **Probing only a backend's first Reset.** Its second Reset would then plan a `DELETE`
+  on every table, and so pay the cold cost anyway.
+- **Probing sequences**, to get under the floor of about 17 ms for 73 `setval`s cold.
+  `pg_sequence_last_value` was slower warm in amendment 1. Anything else needs its own
+  measurement.
+
+### Looking ahead
+
+Under `isolate: false` (#22), backends would live for the whole run. The cold Reset then
+becomes rare, so the saving shrinks while the warm cost stays: #22 should revisit whether
+the probe stays on in that mode.

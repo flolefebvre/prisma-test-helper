@@ -85,13 +85,13 @@ if (!isDatabaseSetUp()) {
 
 ## API
 
-| Export                        | Where it runs                  | What it does                                                                                                                                       |
-| ----------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setupDatabase(db)`           | top of a test file             | Opts the file in: a `beforeAll` and an `afterEach` run the Reset through `db`, a `beforeEach` runs the reset hooks. Refuses a non-Worker Database. |
-| `isDatabaseSetUp()`           | anywhere                       | Whether `setupDatabase(db)` has run in this file.                                                                                                  |
-| `registerResetHook(hook)`     | module scope of a fixture file | Runs `hook({ testName, seed })` in every `beforeEach`.                                                                                             |
-| `setupWorkerDatabase()`       | the setup file                 | Points this worker at its own Worker Database by setting `DATABASE_URL`; returns `{ databaseUrl, databaseName }`.                                  |
-| `createGlobalSetup(options?)` | the global-setup file          | `image` (default `postgres:17-alpine`), `databaseName` (default `prisma_test`).                                                                    |
+| Export                        | Where it runs                  | What it does                                                                                                                                                                                             |
+| ----------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setupDatabase(db)`           | top of a test file             | Opts the file in: a `beforeAll` and an `afterEach` run the Reset through `db`, a `beforeEach` runs the reset hooks, a best-effort `afterAll` vacuums what the file wrote. Refuses a non-Worker Database. |
+| `isDatabaseSetUp()`           | anywhere                       | Whether `setupDatabase(db)` has run in this file.                                                                                                                                                        |
+| `registerResetHook(hook)`     | module scope of a fixture file | Runs `hook({ testName, seed })` in every `beforeEach`.                                                                                                                                                   |
+| `setupWorkerDatabase()`       | the setup file                 | Points this worker at its own Worker Database by setting `DATABASE_URL`; returns `{ databaseUrl, databaseName }`.                                                                                        |
+| `createGlobalSetup(options?)` | the global-setup file          | `image` (default `postgres:17-alpine`), `databaseName` (default `prisma_test`).                                                                                                                          |
 
 The first three import from `@flefebvre/prisma-test-helper`. The last two are wiring, already in place in a wired project — reach for them only when changing the wiring itself, and mind their subpaths: `setupWorkerDatabase` comes from `@flefebvre/prisma-test-helper/setup` and `createGlobalSetup` from `@flefebvre/prisma-test-helper/global-setup`; neither is on the package root.
 

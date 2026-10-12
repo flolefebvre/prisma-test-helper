@@ -1,7 +1,12 @@
 # Plan — #17: cold first Reset on a new backend
 
-Status: **proposed**, not started. Supersedes the option list in the issue body; the
-corrections below should be posted back to #17 once this plan is accepted.
+Status: **implemented**. bench4 reproduced the gain and the gate passed on the cold and
+per-file criteria. The warm Reset came out slower: +1.9 ms at one worker and +1.7 ms at
+20 in the final run. The maintainer accepted that in exchange for the per-file saving,
+with relations resolved by `to_regclass`.
+The VACUUM is skipped while another session has a transaction open. Results and the
+trade-off: amendment 2 of docs/adr/0001. Supersedes the option list in the issue body;
+the corrections below should be posted back to #17.
 
 ## Goal
 
