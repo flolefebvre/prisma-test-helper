@@ -143,6 +143,45 @@ module, and worth adding to one that lacks it. It is the tripwire for the orderi
 in [step 4](#4-per-worker-setup): if the setup file ever imports your app statically,
 this throw fires loudly instead of silently pointing the suite at your dev database.
 
+### Database-free commands
+
+The throw fires in any process that imports the module without `DATABASE_URL`, not only
+in tests. If a command that needs no database still imports it (`next build`, a script,
+a code generator), that command fails with `DATABASE_URL is not set`. For those
+projects, build the client on first use instead of at import, and keep `export const db`
+so the rest of the app is untouched:
+
+```ts
+// src/db/client.ts: throws on first use, not at import
+import { PrismaPg } from "@prisma/adapter-pg";
+
+import { PrismaClient } from "../generated/prisma/client.js";
+
+let client: PrismaClient | undefined;
+
+function getClient(): PrismaClient {
+  if (!client) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error("DATABASE_URL is not set");
+    }
+    client = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  }
+  return client;
+}
+
+export const db = new Proxy({} as PrismaClient, {
+  get(_, property) {
+    const value = Reflect.get(getClient(), property);
+    return typeof value === "function" ? value.bind(getClient()) : value;
+  },
+});
+```
+
+With this variant the import no longer throws, so the check that catches a misrouted
+client is `setupDatabase(db)`'s guard, which refuses a client connected anywhere but this
+worker's database. Projects without such a command keep the simpler module above.
+
 **Done when:** the module path and export name are known, the file exists, and it builds
 the client from `DATABASE_URL`.
 

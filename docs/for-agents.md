@@ -75,7 +75,9 @@ for files that already exist.
    candidates → ask the user which one the app imports. None → create one. A module that
    does not read `DATABASE_URL` → tell the user and change it with their agreement. An
    existing module without the `DATABASE_URL is not set` throw → offer to add it, and add
-   it only if the user agrees. See
+   it only if the user agrees. If a database-free command imports the module (`next build`,
+   say), use the throw-on-first-use variant instead: see
+   [Database-free commands](setup.md#database-free-commands). See
    [Your Prisma client module](setup.md#2-your-prisma-client-module).
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).
