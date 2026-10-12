@@ -301,8 +301,9 @@ them itself. Exported from `@flefebvre/prisma-test-helper/setup`.
 Opts a test file into the database. `db` is your Prisma client — typed structurally as
 anything with `$queryRawUnsafe` and `$executeRawUnsafe` (the `ResetClient` type), so the
 package never imports `@prisma/client`. Registers a `beforeAll` that runs the Reset once,
-a `beforeEach` that runs the Reset Hooks, and an `afterEach` that runs the Reset after
-every test.
+a `beforeEach` that runs the Reset Hooks, an `afterEach` that runs the Reset after every
+test, and an `afterAll` that vacuums the tables the file wrote to, so the next file's
+first Reset stays cheap. That `VACUUM` is best effort: it never fails the file.
 
 It refuses, before registering anything, unless `DATABASE_URL` names a Worker Database
 (`<databaseName>_<pool id>`), and its `beforeAll` refuses a client connected to any other

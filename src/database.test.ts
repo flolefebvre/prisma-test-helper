@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 
 import {
   hashName,
@@ -10,10 +10,11 @@ import {
 import type { ResetClient } from "./reset.js";
 
 // Docker-free: `registerDatabase` — `setupDatabase` with its environment reads made
-// explicit — is driven around a stub client that answers the guard's check and the
-// discovery query, and records every Reset it is sent. That is enough to pin the
-// lifecycle's shape: when the Reset runs relative to the Reset Hooks. That the Reset
-// really empties a database is proven by tests/integration/reset.test.ts.
+// explicit — is driven around a stub client that answers the guard's check, the
+// discovery query and the vacuum probe, and records every Reset and VACUUM it is sent.
+// That is enough to pin the lifecycle's shape: when the Reset runs relative to the Reset
+// Hooks, and that the VACUUM between files comes last. That they really empty and vacuum
+// a database is proven by tests/integration/reset.test.ts and vacuum.test.ts.
 
 const WORKER_URL = "postgresql://u:p@localhost:5432/prisma_test_1";
 
@@ -21,13 +22,26 @@ const WORKER_URL = "postgresql://u:p@localhost:5432/prisma_test_1";
 const events: string[] = [];
 
 const stub: ResetClient = {
-  $queryRawUnsafe: async (query: string) =>
-    query.includes("current_database()") ? [{ name: "prisma_test_1" }] : [],
-  $executeRawUnsafe: async () => {
-    events.push("reset");
+  $queryRawUnsafe: async (query: string) => {
+    if (query.includes("current_database()::text")) return [{ name: "prisma_test_1" }];
+    if (query.includes("t.item AS name")) {
+      events.push("vacuum probe");
+      return [{ name: '"public"."Author"' }];
+    }
+    return [{ kind: "table", schema: "public", name: "Author", relkind: "r", start_value: null }];
+  },
+  $executeRawUnsafe: async (query: string) => {
+    events.push(query.startsWith("VACUUM") ? "vacuum" : "reset");
     return 0;
   },
 };
+
+// Registered before `registerDatabase()`, so with Vitest's default `sequence.hooks:
+// "stack"` it runs after the file's `afterAll` — and fails the file if the VACUUM between
+// files did not run last.
+afterAll(() => {
+  expect(events.slice(-3)).toEqual(["reset", "vacuum probe", "vacuum"]);
+});
 
 // Read before `registerDatabase()` runs: the opt-in flag has to start out false, and the
 // call below flips it during collection.
