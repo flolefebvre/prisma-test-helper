@@ -39,7 +39,9 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "docs/*.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.build.json",
