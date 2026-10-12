@@ -67,7 +67,8 @@ pnpm exec tsc --noEmit
 ```
 
 Adjust the directories to wherever your tests live, and `db` to your client's export
-name.
+name. The replacement also rewrites `setupDatabase()` in comments and strings: review the
+diff, and restore any string that quotes one of this package's error messages.
 
 - **Files that need a new `db` import** are the ones that called `setupDatabase()` but
   never queried the client themselves: they went through factories, services or route
@@ -104,8 +105,10 @@ Every write commits, so a test sees exactly what production would:
   writes in an `afterEach` registered after `setupDatabase(db)`.
 - **`$transaction`, second clients and concurrent transactions behave as in
   production.** A `$transaction` runs on its own connection and commits or rolls back for
-  real; a second `PrismaClient` or a queue worker sees committed rows; transactions fired
-  with `Promise.all` run in parallel instead of one after another.
+  real; a second `PrismaClient` or a queue worker sees every row a test writes, from the
+  moment it is written; transactions fired with `Promise.all` run in parallel instead of
+  one after another. Flip or delete any assertion that a test's writes are invisible
+  outside it, or never reach the database.
 - **Rows your migrations insert are emptied too.** The Reset empties every table but
   `_prisma_migrations` and extension-owned tables such as PostGIS's `spatial_ref_sys`.
   Reference data a migration inserts is gone before the first test: re-create it in a
