@@ -143,7 +143,7 @@ export default createGlobalSetup({ image: "postgres:16-alpine" });
 ```
 
 No compose file, or no Postgres service in it → leave the call bare. It defaults to
-`postgres:17-alpine`; pass `image` if production runs another major. Every option is in
+`postgres:18-alpine`; pass `image` if production runs another major. Every option is in
 the [API reference](api.md#createglobalsetupoptions).
 
 This file must be inside `tsconfig.json`'s `include`. It carries the module augmentation

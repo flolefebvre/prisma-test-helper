@@ -78,7 +78,7 @@ for files that already exist.
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).
 5. **Write the global-setup file**, pinning `image` from the project's compose file when
-   it names Postgres; otherwise tell the user it defaults to `postgres:17-alpine`. See
+   it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. See
    [Global setup](setup.md#3-global-setup).
 6. **Write or merge the setup file**, calling `setupWorkerDatabase()` first with no static
    app imports. See [Per-worker setup](setup.md#4-per-worker-setup).

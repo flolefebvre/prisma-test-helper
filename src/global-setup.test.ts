@@ -73,10 +73,10 @@ async function runSetup(
 }
 
 describe("createGlobalSetup", () => {
-  test("defaults to postgres:17-alpine and a prisma_test Template Database", async () => {
+  test("defaults to postgres:18-alpine and a prisma_test Template Database", async () => {
     await runSetup();
 
-    expect(postgres.images).toEqual(["postgres:17-alpine"]);
+    expect(postgres.images).toEqual(["postgres:18-alpine"]);
     expect(postgres.databases).toEqual(["prisma_test"]);
   });
 

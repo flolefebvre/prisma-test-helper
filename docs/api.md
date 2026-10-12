@@ -101,7 +101,7 @@ the container when the run ends.
 
 | Option         | Default              | What it does                                                                                                                                       |
 | -------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `image`        | `postgres:17-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on. |
+| `image`        | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on. |
 | `databaseName` | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                               |
 
 ### Typed `inject`
