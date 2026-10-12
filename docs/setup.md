@@ -242,8 +242,23 @@ setup file imports app modules statically, turn them into dynamic `import()` cal
 `setupWorkerDatabase()`. Library imports are safe: they read no environment at import
 time.
 
-**Done when:** the file calls `setupWorkerDatabase()` first, and the only static imports
-in it are library ones.
+### TLS
+
+The container speaks plaintext. If your app turns on TLS whenever a variable is set (an
+SSL mode, a CA path), every database test fails with
+`The server does not support SSL connections`. Unset the variable your app checks, below
+`setupWorkerDatabase()`. For `pg`'s own `PGSSLMODE`:
+
+```ts
+setupWorkerDatabase();
+delete process.env.PGSSLMODE;
+```
+
+The setup file runs in each test file's own process, so this touches nothing outside the
+test run.
+
+**Done when:** the file calls `setupWorkerDatabase()` first, the only static imports in
+it are library ones, and it unsets any variable that turns on TLS.
 
 ## 5. Vitest config
 
