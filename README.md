@@ -69,7 +69,7 @@ One run of your test suite goes through this lifecycle:
 6. The container is removed when the run ends.
 
 Migrations run once, clones are cheap, and the Reset is one planned statement — so the
-per-test overhead is a few milliseconds (about 5 ms at 73 tables, 9 ms with 20 workers
+per-test overhead is a few milliseconds (about 7 ms at 73 tables, 10 ms with 20 workers
 resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 `TRUNCATE`, with the benchmark behind it:
 [ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
