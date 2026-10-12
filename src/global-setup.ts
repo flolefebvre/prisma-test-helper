@@ -29,7 +29,7 @@ export interface CreateGlobalSetupOptions {
   /**
    * Postgres image to run. Pin it to the same major as your production database, so a
    * test never runs against a different Postgres than the one you deploy on.
-   * @default "postgres:17-alpine"
+   * @default "postgres:18-alpine"
    */
   image?: string;
   /**
@@ -42,6 +42,8 @@ export interface CreateGlobalSetupOptions {
 
 // initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
 // PGDATA must therefore be a subdirectory the container creates itself.
+// From 18 the image's VOLUME is /var/lib/postgresql: this tmpfs nests inside it, the
+// data directory still lives on tmpfs, and the empty volume goes with the container at stop.
 const PGDATA_MOUNT = "/var/lib/postgresql/data";
 const PGDATA = `${PGDATA_MOUNT}/pgdata`;
 
@@ -62,7 +64,7 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * need a lock; cloning before workers exist needs none.
  */
 export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
-  const { image = "postgres:17-alpine", databaseName = "prisma_test" } = options;
+  const { image = "postgres:18-alpine", databaseName = "prisma_test" } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
     await assertDockerReachable();
