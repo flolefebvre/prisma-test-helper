@@ -82,6 +82,13 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 - **Docker** (or another container runtime Testcontainers can reach).
 - Peer dependencies: **Vitest ^5.0.3** and **Prisma ^7**, with your migrations committed
   (`prisma migrate deploy` is what the harness runs).
+- A Postgres superuser for the Reset. The container's user is one, so there is nothing to
+  do.
+- Testcontainers comes with this package; do not add it yourself. Under pnpm, none of
+  its build scripts needs approving.
+
+Details for each, including the pnpm `allowBuilds` entries, are in
+[Before you start](docs/setup.md#before-you-start).
 
 ## Installation
 

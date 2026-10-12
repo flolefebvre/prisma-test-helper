@@ -68,7 +68,9 @@ for files that already exist.
    requirement before touching a file; on too-old versions, stop. A CommonJS project is
    fine. See [Before you start](setup.md#before-you-start).
 2. **Install** `@flefebvre/prisma-test-helper` as a dev dependency with the package
-   manager the lockfile names. See [Before you start](setup.md#before-you-start).
+   manager the lockfile names. Never add `testcontainers` yourself. Under pnpm, list
+   `cpu-features`, `ssh2` and `protobufjs` as `false` in `allowBuilds`. See
+   [Before you start](setup.md#before-you-start).
 3. **Locate the Prisma client module** and record its path and export name. Several
    candidates → ask the user which one the app imports. None → create one. A module that
    does not read `DATABASE_URL` → tell the user and change it with their agreement. An

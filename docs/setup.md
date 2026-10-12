@@ -20,6 +20,11 @@ Confirm every requirement before touching a file:
   `prisma migrate deploy`, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. Without it the wiring can still be written, but the
   check in [step 6](#6-prove-it-works) cannot run until Docker is started.
+- A Postgres superuser. The Reset sets `session_replication_role` and reads `pg_stat_file`
+  and `pg_stat_activity`, which need one. The container the harness starts connects as
+  its superuser, so there is nothing to do. Any future way to point the harness at
+  another server must keep a superuser role; the why is in
+  [ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 **A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the
 wiring runs under Vitest, which transforms modules through Vite rather than leaving them
@@ -38,6 +43,26 @@ detected from the lockfile in the project root (`pnpm-lock.yaml` → pnpm,
 pnpm add -D @flefebvre/prisma-test-helper
 # or: npm i -D / yarn add -D / bun add -d
 ```
+
+`testcontainers` and `@testcontainers/postgresql` are dependencies of this package: do
+not add them to your project.
+
+**pnpm build scripts.** Through testcontainers, the install pulls in `cpu-features`,
+`ssh2` and `protobufjs`, which carry build scripts. The harness runs with all three
+unbuilt, so nothing from this package needs approving. pnpm 10 skips their scripts with a
+warning; pnpm 11 fails the install with `ERR_PNPM_IGNORED_BUILDS` until they are listed.
+List them as `false` in `pnpm-workspace.yaml` (pnpm before 10.26 does not know
+`allowBuilds`: put them under `ignoredBuiltDependencies` instead):
+
+```yaml
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
+```
+
+`prisma` and `@prisma/engines` show up in the same report and do need `true`, but that
+is Prisma's requirement, not this package's.
 
 **Done when:** every requirement is confirmed, `@flefebvre/prisma-test-helper` is in
 `devDependencies`, and the install exited clean.
