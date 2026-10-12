@@ -5,11 +5,12 @@
   "projectTitle": "@flefebvre/prisma-test-helper",
   "description": "Throwaway-Postgres test harness for Prisma + Vitest: one container per run, one database per Vitest worker, tests that commit for real and a batched reset after every test. Postgres-only.",
   "branch": "main",
-  "folders": [],
+  "folders": ["docs"],
   "excludeFolders": [
     ".github",
     "docs/adr",
     "docs/agents",
+    "docs/plans",
     "node_modules",
     "dist",
     "prisma",
@@ -23,7 +24,7 @@
     "Never write cleanup code. Tests commit for real, and the Reset empties every table and rewinds every sequence before a file's first test and after every test, so truncation, delete-all hooks and ordering workarounds are unnecessary and wrong.",
     "Writes in beforeAll are allowed but are removed by the Reset after the first test; build per-test data in the test, in beforeEach, or in a factory.",
     "Import the public API from \"@flefebvre/prisma-test-helper\"; the Vitest wiring entry points are the \"@flefebvre/prisma-test-helper/global-setup\" and \"@flefebvre/prisma-test-helper/setup\" subpaths.",
-    "The Vitest setup file only calls setupWorkerDatabase() and must keep zero static imports of the app: the app's Prisma client must be built from DATABASE_URL after that call. Nothing is mocked; $transaction and second clients behave as in production.",
+    "The Vitest setup file calls setupWorkerDatabase() first and keeps zero static imports of the app (reach app modules from it with a dynamic import() only): the app's Prisma client must be built from DATABASE_URL after that call. Nothing is mocked; $transaction and second clients behave as in production.",
     "Test data factories live in the consumer project, not in the harness. They plug in through the Reset Hook, which receives { testName, seed } for deterministic seeding.",
     "Docker must be available at test time; Testcontainers starts and removes the container automatically, including after a crash."
   ],

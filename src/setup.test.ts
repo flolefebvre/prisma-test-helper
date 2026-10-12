@@ -58,5 +58,7 @@ describe("setupWorkerDatabase", () => {
     // added the setup file but never registered the global-setup one.
     expect(() => setupWorkerDatabase()).toThrow(/globalSetup/);
     expect(() => setupWorkerDatabase()).toThrow(/createGlobalSetup/);
+    // The path the docs prescribe, so the error and the docs name the same file.
+    expect(() => setupWorkerDatabase()).toThrow('globalSetup: ["tests/global-setup.ts"]');
   });
 });

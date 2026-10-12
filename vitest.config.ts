@@ -3,12 +3,13 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     projects: [
-      // Docker-free: everything under src/ runs against mocked testcontainers.
+      // Docker-free: everything under src/ runs against mocked testcontainers, and
+      // tests/package-files.test.ts checks the tarball through `npm pack --dry-run`.
       {
         test: {
           name: "unit",
           environment: "node",
-          include: ["src/**/*.test.ts"],
+          include: ["src/**/*.test.ts", "tests/package-files.test.ts"],
           clearMocks: true,
           restoreMocks: true,
           // Same maxWorkers as the integration project, so both share one group —
@@ -22,7 +23,7 @@ export default defineConfig({
         test: {
           name: "integration",
           environment: "node",
-          include: ["tests/**/*.test.ts"],
+          include: ["tests/integration/**/*.test.ts"],
           // Starts the container and provisions the Worker Databases, once per run.
           globalSetup: ["tests/global-setup.ts"],
           // Points DATABASE_URL at this worker's Worker Database, once per test file.
