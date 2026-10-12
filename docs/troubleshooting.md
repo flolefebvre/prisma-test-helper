@@ -18,12 +18,15 @@ Find the error you got. Each one names what is mis-wired and where the fix lives
 | `setupDatabase() was called twice in this file`                       | Remove one of the calls; keep the one at the top of the file.                                                                                                                                                                                                                                                                                                                                        |
 | `the Reset could not empty <name>:`                                   | Postgres's own message follows. If it is a lock timeout, a connection the test opened still holds a lock: an un-awaited query, or a transaction a second client never ended. Finish both before the test ends: see [Finish what a test opens](writing-tests.md#finish-what-a-test-opens).                                                                                                            |
 
-## Errors from the toolchain
+## Errors from the toolchain and Postgres
 
-These come from Vite or Next.js, not from this package, but they are the usual first
-failures when wiring a Next.js or Vite app.
+These come from Vite, Next.js, pnpm, your own client module or Postgres, not from this
+package, but they are the usual first failures when wiring an app.
 
-| Error                                                           | What is mis-wired                                                                                                               |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Cannot find package '@/lib/db'` (or any other alias)           | The project uses `tsconfig.json` path aliases and Vitest does not resolve them: see [Path aliases](setup.md#path-aliases).      |
-| `This module cannot be imported from a Client Component module` | Your client module imports `server-only`, which needs an alias in the Vitest config: see [`server-only`](setup.md#server-only). |
+| Error                                                                         | What is mis-wired                                                                                                                                                                                              |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Cannot find package '@/lib/db'` (or any other alias)                         | The project uses `tsconfig.json` path aliases and Vitest does not resolve them: see [Path aliases](setup.md#path-aliases).                                                                                     |
+| `This module cannot be imported from a Client Component module`               | Your client module imports `server-only`, which needs an alias in the Vitest config: see [`server-only`](setup.md#server-only).                                                                                |
+| `The server does not support SSL connections`                                 | Your app turns on TLS from an environment variable, and the test container speaks plaintext. Set that variable to its off value in the setup file: see [TLS](setup.md#tls).                                    |
+| `ERR_PNPM_IGNORED_BUILDS` (`cpu-features`, `ssh2`, `protobufjs`)              | pnpm wants a decision on build scripts that come in through testcontainers. The harness needs none of them built: list them as `false` under `allowBuilds`, see [Before you start](setup.md#before-you-start). |
+| `DATABASE_URL is not set` from `next build` or another command outside Vitest | Your client module throws at import, and a command that needs no database imports it. Build the client on first use instead: see [Database-free commands](setup.md#database-free-commands).                    |

@@ -20,6 +20,11 @@ Confirm every requirement before touching a file:
   `prisma migrate deploy`, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. Without it the wiring can still be written, but the
   check in [step 6](#6-prove-it-works) cannot run until Docker is started.
+- A Postgres superuser. The Reset sets `session_replication_role` and reads `pg_stat_file`
+  and `pg_stat_activity`, which need one. The container the harness starts connects as
+  its superuser, so there is nothing to do. The harness needs this of any server it runs
+  against; the why is in
+  [ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 **A missing `"type": "module"` is not a blocker.** The package ships ESM only, but the
 wiring runs under Vitest, which transforms modules through Vite rather than leaving them
@@ -38,6 +43,26 @@ detected from the lockfile in the project root (`pnpm-lock.yaml` → pnpm,
 pnpm add -D @flefebvre/prisma-test-helper
 # or: npm i -D / yarn add -D / bun add -d
 ```
+
+`testcontainers` and `@testcontainers/postgresql` are dependencies of this package: do
+not add them to your project.
+
+**pnpm build scripts.** Through testcontainers, the install pulls in `cpu-features`,
+`ssh2` and `protobufjs`, which carry build scripts. The harness runs with all three
+unbuilt, so nothing from this package needs approving. pnpm 10 skips their scripts with a
+warning; pnpm 11 and later fail the install with `ERR_PNPM_IGNORED_BUILDS` until they are listed.
+List them as `false` in `pnpm-workspace.yaml` (pnpm before 10.26 does not know
+`allowBuilds`: put them under `ignoredBuiltDependencies` instead):
+
+```yaml
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
+```
+
+`prisma` and `@prisma/engines` show up in the same report and do need `true`, but that
+is Prisma's requirement, not this package's.
 
 **Done when:** every requirement is confirmed, `@flefebvre/prisma-test-helper` is in
 `devDependencies`, and the install exited clean.
@@ -118,6 +143,45 @@ module, and worth adding to one that lacks it. It is the tripwire for the orderi
 in [step 4](#4-per-worker-setup): if the setup file ever imports your app statically,
 this throw fires loudly instead of silently pointing the suite at your dev database.
 
+### Database-free commands
+
+The throw fires in any process that imports the module without `DATABASE_URL`, not only
+in tests. If a command that needs no database still imports it (`next build`, a script,
+a code generator), that command fails with `DATABASE_URL is not set`. For those
+projects, build the client on first use instead of at import, and keep `export const db`
+so the rest of the app is untouched:
+
+```ts
+// src/db/client.ts: throws on first use, not at import
+import { PrismaPg } from "@prisma/adapter-pg";
+
+import { PrismaClient } from "../generated/prisma/client.js";
+
+let client: PrismaClient | undefined;
+
+function getClient(): PrismaClient {
+  if (!client) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error("DATABASE_URL is not set");
+    }
+    client = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
+  }
+  return client;
+}
+
+export const db = new Proxy({} as PrismaClient, {
+  get(_, property) {
+    const value = Reflect.get(getClient(), property);
+    return typeof value === "function" ? value.bind(getClient()) : value;
+  },
+});
+```
+
+With this variant the import no longer throws, so the check that catches a misrouted
+client is `setupDatabase(db)`'s guard, which refuses a client connected anywhere but this
+worker's database. Projects without such a command keep the simpler module above.
+
 **Done when:** the module path and export name are known, the file exists, and it builds
 the client from `DATABASE_URL`.
 
@@ -178,8 +242,25 @@ setup file imports app modules statically, turn them into dynamic `import()` cal
 `setupWorkerDatabase()`. Library imports are safe: they read no environment at import
 time.
 
-**Done when:** the file calls `setupWorkerDatabase()` first, and the only static imports
-in it are library ones.
+### TLS
+
+The container speaks plaintext. If your app turns on TLS whenever a variable is set (an
+SSL mode, a CA path), every database test fails with
+`The server does not support SSL connections`. Set the variable your app checks to its
+off value, below `setupWorkerDatabase()` (for a CA path, the empty string). For `pg`'s
+own `PGSSLMODE`:
+
+```ts
+setupWorkerDatabase();
+process.env.PGSSLMODE = "disable";
+```
+
+Assign rather than delete: a loader like dotenv leaves a variable that is already set
+alone, but would put a deleted one back from your `.env`. The setup file runs in each test
+file's own process, so this touches nothing outside the test run.
+
+**Done when:** the file calls `setupWorkerDatabase()` first, the only static imports in
+it are library ones, and it sets any variable that turns on TLS to its off value.
 
 ## 5. Vitest config
 
