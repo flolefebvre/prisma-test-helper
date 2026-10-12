@@ -85,7 +85,7 @@ for files that already exist.
    it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. See
    [Global setup](setup.md#3-global-setup).
 6. **Write or merge the setup file**, calling `setupWorkerDatabase()` first with no static
-   app imports. If the app turns on TLS from an environment variable, unset it right
+   app imports. If the app turns on TLS from an environment variable, override it right
    after: see [TLS](setup.md#tls). See [Per-worker setup](setup.md#4-per-worker-setup).
 7. **Merge the Vitest config**: the four settings, on the database project when there are
    `projects`, plus alias resolution and the `server-only` alias when the project needs

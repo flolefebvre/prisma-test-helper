@@ -246,19 +246,21 @@ time.
 
 The container speaks plaintext. If your app turns on TLS whenever a variable is set (an
 SSL mode, a CA path), every database test fails with
-`The server does not support SSL connections`. Unset the variable your app checks, below
-`setupWorkerDatabase()`. For `pg`'s own `PGSSLMODE`:
+`The server does not support SSL connections`. Set the variable your app checks to its
+off value, below `setupWorkerDatabase()` (for a CA path, the empty string). For `pg`'s
+own `PGSSLMODE`:
 
 ```ts
 setupWorkerDatabase();
-delete process.env.PGSSLMODE;
+process.env.PGSSLMODE = "disable";
 ```
 
-The setup file runs in each test file's own process, so this touches nothing outside the
-test run.
+Assign rather than delete: a loader like dotenv leaves a variable that is already set
+alone, but would put a deleted one back from your `.env`. The setup file runs in each test
+file's own process, so this touches nothing outside the test run.
 
 **Done when:** the file calls `setupWorkerDatabase()` first, the only static imports in
-it are library ones, and it unsets any variable that turns on TLS.
+it are library ones, and it sets any variable that turns on TLS to its off value.
 
 ## 5. Vitest config
 
