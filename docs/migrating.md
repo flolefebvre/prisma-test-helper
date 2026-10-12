@@ -25,9 +25,10 @@ Your setup file and every database test file change. `vitest.config.ts` and
 ### The setup file loses its `vi.mock`
 
 There is no module mock any more: test files import your real client. In
-`tests/setup.ts`, delete the `vi.mock(...)` block, the `installTestTransaction` import and
-the `vi` import, and keep the `setupWorkerDatabase()` call. Its return value is no longer
-needed:
+`tests/setup.ts`, delete the `vi.mock(...)` block that calls `installTestTransaction`, and
+the `installTestTransaction` import. Keep the `setupWorkerDatabase()` call; its return
+value is no longer needed. Delete the `vi` import too, unless something else in the file
+still uses it. The harness's part of the file is now:
 
 ```ts
 // tests/setup.ts: no static imports of your app here
@@ -36,7 +37,8 @@ import { setupWorkerDatabase } from "@flefebvre/prisma-test-helper/setup";
 setupWorkerDatabase();
 ```
 
-The ordering rule is unchanged: the setup file keeps zero static imports of your app.
+Leave everything else in the file where it is, below `setupWorkerDatabase()`. The
+ordering rule is unchanged: the setup file keeps zero static imports of your app.
 
 ### Removed exports
 

@@ -28,7 +28,8 @@ The **Reset** is the cleanup. Before a file's first test and after every test, i
 every table and rewinds every sequence in one statement, so each test starts from an
 empty Worker Database with ids back at 1: no truncation of your own, no ordering
 constraints, no leftover rows. That includes rows your migrations inserted: every table
-but `_prisma_migrations` is emptied, so reference data the tests need belongs in a
+but `_prisma_migrations` and extension-owned ones such as PostGIS's `spatial_ref_sys` is
+emptied, so reference data the tests need belongs in a
 [Reset Hook](#fixtures-and-seeded-fake-data).
 
 Import the client the way the rest of the project does. The relative `.js` specifier
