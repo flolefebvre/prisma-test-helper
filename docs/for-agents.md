@@ -49,9 +49,9 @@ signatures: [API](api.md).
    then fails the test.
 5. **Leave `pool: "forks"` and `isolate: true` alone.** Together they re-run `setupFiles`
    in a fresh process per test file; widening either breaks isolation silently.
-6. **Keep the setup file free of static app imports.** It only calls
-   `setupWorkerDatabase()`; the app's client must be built from `DATABASE_URL` after
-   that call. Reach app modules from it with a dynamic `import()` only.
+6. **Keep the setup file free of static app imports.** It calls `setupWorkerDatabase()`
+   first; the app's client must be built from `DATABASE_URL` after that call. Reach app
+   modules from it with a dynamic `import()` only; library imports are safe.
 7. **Mock nothing.** Postgres only: no SQLite, no mocked client. `$transaction`, a second
    client and deferred constraints behave as in production, so test them as they are.
 8. **Factories live in the project, not in the harness.** They plug in through
@@ -71,7 +71,9 @@ for files that already exist.
    manager the lockfile names. See [Before you start](setup.md#before-you-start).
 3. **Locate the Prisma client module** and record its path and export name. Several
    candidates → ask the user which one the app imports. None → create one. A module that
-   does not read `DATABASE_URL` → tell the user and change it with their agreement. See
+   does not read `DATABASE_URL` → tell the user and change it with their agreement. An
+   existing module without the `DATABASE_URL is not set` throw → offer to add it, and add
+   it only if the user agrees. See
    [Your Prisma client module](setup.md#2-your-prisma-client-module).
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).

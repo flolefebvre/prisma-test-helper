@@ -39,6 +39,9 @@ pnpm add -D @flefebvre/prisma-test-helper
 # or: npm i -D / yarn add -D / bun add -d
 ```
 
+**Done when:** every requirement is confirmed, `@flefebvre/prisma-test-helper` is in
+`devDependencies`, and the install exited clean.
+
 ## 1. Prisma config
 
 Prisma 7 reads the datasource URL from `prisma.config.ts`, not from the schema, and
