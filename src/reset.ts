@@ -398,35 +398,14 @@ export interface PreparedReset {
   vacuum(): Promise<void>;
 }
 
-/**
- * Guard, discover, and build the Reset for one Worker Database; resolves to the
- * functions that run it and the `VACUUM` between files. Nothing is deleted before both
- * guards pass: the URL must name a Worker Database, and the client must actually be
- * connected to that database — a client module that reads some other variable than
- * `DATABASE_URL` would otherwise have the Reset empty whatever it points at. The first
- * raw query connects a client that is not yet connected, so a freshly built one works.
- *
- * Discovery runs once here and both statements are reused after it: the schema does not
- * change mid-run.
- */
-export async function prepareReset(
-  db: ResetClient,
-  databaseUrl: string,
-  templateName: string,
-): Promise<PreparedReset> {
-  const expected = assertWorkerDatabase(databaseUrl, templateName);
+/** What discovery produces for one Worker Database: the two statements built from it. */
+interface Discovered {
+  statement: string;
+  vacuumProbe: string | undefined;
+}
 
-  const [connected] = (await db.$queryRawUnsafe("SELECT current_database()::text AS name")) as {
-    name: string;
-  }[];
-  if (connected?.name !== expected) {
-    throw new Error(
-      `the client passed to setupDatabase() is connected to ${connected?.name}, but ` +
-        `DATABASE_URL names ${expected} — build the client from DATABASE_URL`,
-    );
-  }
-
-  const relations = (await db.$queryRawUnsafe(DISCOVERY_QUERY)) as DiscoveredRelation[];
+/** Build the Reset statement and the vacuum probe from the rows of {@link DISCOVERY_QUERY}. */
+function discover(relations: readonly DiscoveredRelation[]): Discovered {
   const tables: ResetTable[] = [];
   const baseline: BaselineTable[] = [];
   for (const { kind, schema, name, relkind, ordinal, columns } of relations) {
@@ -447,6 +426,63 @@ export async function prepareReset(
   // Baseline tables are never probed — their heaps are never empty — but always
   // vacuumed, as restores leave their old rows dead.
   const vacuumProbe = buildVacuumProbe(tables, baseline);
+  return { statement, vacuumProbe };
+}
+
+// Discovery's products, per Worker Database URL, for as long as this module lives: one
+// test file under `isolate: true`, every file a worker runs under `isolate: false`. Only
+// strings built from the discovery rows are kept — never a client, never a closure — so
+// each file's Reset still runs through the client that file passed. The schema is
+// migrated once per run, before any worker starts, so it does not change under the
+// cache; DDL a test runs itself is not seen by later files on the worker (a documented
+// limit of `isolate: false`).
+const discoveries = new Map<string, Discovered>();
+
+/**
+ * Forget every cached discovery, so the next {@link prepareReset} discovers again.
+ * Internal: for tests that change the schema mid-run, and for unit tests; not on the
+ * package root.
+ */
+export function clearResetCache(): void {
+  discoveries.clear();
+}
+
+/**
+ * Guard, discover, and build the Reset for one Worker Database; resolves to the
+ * functions that run it and the `VACUUM` between files. Nothing is deleted before both
+ * guards pass: the URL must name a Worker Database, and the client must actually be
+ * connected to that database — a client module that reads some other variable than
+ * `DATABASE_URL` would otherwise have the Reset empty whatever it points at. The first
+ * raw query connects a client that is not yet connected, so a freshly built one works.
+ *
+ * Both guards run on every call. Discovery runs once per Worker Database URL for as long
+ * as this module lives — once per file under `isolate: true`, once per worker under
+ * `isolate: false` — and both statements are reused after it: the schema does not change
+ * mid-run. A discovery that fails is not kept, so the next call tries again.
+ */
+export async function prepareReset(
+  db: ResetClient,
+  databaseUrl: string,
+  templateName: string,
+): Promise<PreparedReset> {
+  const expected = assertWorkerDatabase(databaseUrl, templateName);
+
+  const [connected] = (await db.$queryRawUnsafe("SELECT current_database()::text AS name")) as {
+    name: string;
+  }[];
+  if (connected?.name !== expected) {
+    throw new Error(
+      `the client passed to setupDatabase() is connected to ${connected?.name}, but ` +
+        `DATABASE_URL names ${expected} — build the client from DATABASE_URL`,
+    );
+  }
+
+  let cached = discoveries.get(databaseUrl);
+  if (cached === undefined) {
+    cached = discover((await db.$queryRawUnsafe(DISCOVERY_QUERY)) as DiscoveredRelation[]);
+    discoveries.set(databaseUrl, cached);
+  }
+  const { statement, vacuumProbe } = cached;
 
   return {
     async reset() {
