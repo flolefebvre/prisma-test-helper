@@ -75,7 +75,8 @@ vi.mock("@testcontainers/postgresql", () => ({
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
 // first query containing a key resolve with those rows (a function answers each such
-// query anew). `connect` makes every connect reject with that message. `errorListeners`
+// query anew). `connect` makes every connect reject with that message (and `connectCode`
+// as its SQLSTATE). `errorListeners`
 // holds each client's `error` listener, so a test can drop a connection the way pg does.
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
@@ -89,7 +90,7 @@ const pg = vi.hoisted(() => {
     failWith: undefined as string | undefined,
     failFor: undefined as string | undefined,
   };
-  const failure: { failOn?: string; message?: string; connect?: string } = {};
+  const failure: { failOn?: string; message?: string; connect?: string; connectCode?: string } = {};
   class Client {
     readonly database: string;
     constructor(config: { connectionString: string; ssl?: unknown }) {
@@ -101,7 +102,9 @@ const pg = vi.hoisted(() => {
       return this;
     }
     async connect() {
-      if (failure.connect !== undefined) throw new Error(failure.connect);
+      if (failure.connect !== undefined) {
+        throw Object.assign(new Error(failure.connect), { code: failure.connectCode });
+      }
       events.push(`open ${this.database}`);
     }
     async query(sql: string) {
@@ -141,6 +144,7 @@ beforeEach(() => {
   delete pg.failure.failOn;
   delete pg.failure.message;
   delete pg.failure.connect;
+  delete pg.failure.connectCode;
   vi.stubEnv("PRISMA_TEST_HELPER_URL", "");
 });
 
@@ -661,7 +665,9 @@ describe("createGlobalSetup in url mode", () => {
 
     await runSetup({ url: SERVER });
 
-    expect(pg.connections[0]!.connectionString).toBe("postgresql://dev:pw@localhost:5433/app");
+    // The held connection goes to the server's postgres database; the clones, to the URL.
+    expect(pg.connections[0]!.connectionString).toBe("postgresql://dev:pw@localhost:5433/postgres");
+    expect(pg.connections.at(-1)!.connectionString).toBe("postgresql://dev:pw@localhost:5433/app");
   });
 
   test("runs in url mode from PRISMA_TEST_HELPER_URL alone", async () => {
@@ -799,6 +805,42 @@ describe("createGlobalSetup in url mode", () => {
       pg.answers.set("pg_try_advisory_lock", (sql) => [
         { locked: sql.includes(`, ${runLockKey(DEAD)})`) },
       ]);
+
+    // Advisory locks are per database: runs whose URLs name different databases must
+    // still lock, and sweep, in the same one.
+    test("holds its lock and sweeps on the postgres database, whatever the URL names", async () => {
+      const app = "postgresql://app:s3cret@db.internal:5432/app";
+
+      const { teardown, project } = await runSetup({ url: app });
+      await teardown();
+
+      expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
+        SERVER,
+        `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
+        app,
+        app,
+      ]);
+      expect(pg.queries.slice(0, 2)).toEqual([
+        SERVER_CHECK_QUERY,
+        runLockStatement(runIdOf(project)),
+      ]);
+    });
+
+    test("fails before creating anything when the server has no postgres database", async () => {
+      pg.failure.connect = 'database "postgres" does not exist';
+      pg.failure.connectCode = "3D000";
+
+      const error = (await runSetup({ url: SERVER }).catch((thrown: unknown) => thrown)) as Error;
+
+      expect(error.message).toBe(
+        `the Postgres server ${REDACTED} has no "postgres" database — url mode needs one: ` +
+          "each run holds its lock there, and sweeps the databases killed runs left from " +
+          "there, so that runs whose URLs name different databases still see each other. " +
+          "Create it (CREATE DATABASE postgres), or remove url to run in a container.",
+      );
+      expect(error.cause).toMatchObject({ code: "3D000" });
+      expect(pg.queries).toEqual([]);
+    });
 
     test("checks the server, takes its own lock, sweeps, then creates and marks the template", async () => {
       const { project } = await runSetup({ url: SERVER });

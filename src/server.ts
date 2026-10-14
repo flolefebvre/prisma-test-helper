@@ -311,8 +311,30 @@ export function leftoversByRun(rows: MarkedDatabase[], ownRunId: string): Map<st
 /**
  * The harness's advisory-lock namespace: the first key of every lock it takes, so its
  * locks never collide with an application's that use the two-key form. "pth\0" in ASCII.
+ *
+ * Postgres scopes an advisory lock to the database the session is connected to: a lock
+ * taken in one database never conflicts with the same keys taken in another. So every run
+ * takes and tries these locks in {@link LOCK_DATABASE}, never in the database its URL
+ * names, or runs whose URLs differ would sweep each other's live databases.
  */
 export const RUN_LOCK_NAMESPACE = 0x70746800;
+
+/**
+ * The database every url-mode run holds its lock in and sweeps from: the maintenance
+ * database every stock and managed Postgres ships, whatever database a run's URL names.
+ */
+export const LOCK_DATABASE = "postgres";
+
+/** The error a run on a server without {@link LOCK_DATABASE} fails with. */
+export function noLockDatabaseError(server: string, cause: unknown): Error {
+  return new Error(
+    `the Postgres server ${server} has no "${LOCK_DATABASE}" database — url mode needs ` +
+      "one: each run holds its lock there, and sweeps the databases killed runs left from " +
+      "there, so that runs whose URLs name different databases still see each other. " +
+      `Create it (CREATE DATABASE ${LOCK_DATABASE}), or remove url to run in a container.`,
+    { cause },
+  );
+}
 
 /**
  * The second advisory-lock key of a run: its 32-bit run id read as a signed `int4`, which

@@ -7,7 +7,8 @@
 // The server outlives the run, so a run killed before its teardown leaves its databases
 // there. Each run therefore holds one admin connection for its whole life, carrying an
 // advisory lock keyed by its run id, and marks every database it creates with a Run
-// marker. At startup the Sweep drops the marked databases of every run whose lock is
+// marker. That connection goes to the server's `postgres` database, whatever the URL
+// names: advisory locks are per database, and every run must see every other's. At startup the Sweep drops the marked databases of every run whose lock is
 // free — a run whose session is gone — and leaves those of a live run alone.
 
 import {
@@ -22,10 +23,12 @@ import {
   dropDatabaseStatement,
   dropStatements,
   leftoversByRun,
+  LOCK_DATABASE,
   lostLockMessage,
   MARKED_DATABASES_QUERY,
   markStatement,
   newRunId,
+  noLockDatabaseError,
   redactUrl,
   runLockStatement,
   runTemplateName,
@@ -45,8 +48,10 @@ import { databaseUrl } from "./worker-database.js";
  * Open the run on the server at `url`, and hand back its {@link ServerHandle}.
  *
  * Before anything is created: the names are checked against the identifier limit, then
- * the run opens the admin connection it holds until teardown, and one round-trip on it
- * checks the role is a superuser and the server Postgres 13+. The run then takes its own
+ * the run opens the admin connection it holds until teardown — to the server's
+ * `postgres` database, whatever database `url` names, because advisory locks are per
+ * database — and one round-trip on it checks the role is a superuser and the server
+ * Postgres 13+. The run then takes its own
  * lock, so no other run's Sweep can take it for dead, and sweeps the server. Only then is
  * the run's template, `<databaseName>_<run id>`, created — empty, from the server's default
  * template, ready to migrate — and marked. The admin URL is `url` itself; the handle's
@@ -69,17 +74,22 @@ export async function openUrlServer(options: {
   assertNamesFit(templateName, workerCount, databaseName);
   const server = redactUrl(url);
 
-  // Once the held connection drops, the lock is gone with it: say so, once, and never
-  // close what pg already closed.
+  // Held on the lock database, not the URL's: advisory locks are per database, and every
+  // run must see every other's. Once it drops, the lock is gone with it: say so, once,
+  // and never close what pg already closed.
   let lost = false;
   let held: HeldAdminConnection;
   try {
-    held = await openAdminConnection(url, (error) => {
+    held = await openAdminConnection(databaseUrl(url, LOCK_DATABASE), (error) => {
       if (lost) return;
       lost = true;
       console.warn(lostLockMessage(server, error.message));
     });
   } catch (cause) {
+    // SQLSTATE 3D000: the database does not exist.
+    if ((cause as { code?: unknown } | null)?.code === "3D000") {
+      throw noLockDatabaseError(server, cause);
+    }
     throw connectFailure(cause, url, source);
   }
   const closeHeld = async () => {
