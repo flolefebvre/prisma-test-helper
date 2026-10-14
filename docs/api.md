@@ -232,7 +232,8 @@ run your `seed`, clone the Worker Databases, and remove everything at the end.
 - **Any database on the server.** The URL may name `postgres` or any other database: the
   harness connects through it only to create and drop the run's own databases, and never
   writes into it. The Template Database and Worker Database URLs are the same URL with
-  another database name.
+  another database name. The server must also have a `postgres` database, whatever the
+  URL names: each run holds its lock there (see killed runs below).
 - **Names unique to the run.** The Template Database is `<databaseName>_<run id>`, where
   the run id is 8 random hex characters (`prisma_test_3f9a01bc`), and the Worker Databases
   are `<databaseName>_<run id>_1..N`. Two runs against one server never collide.
@@ -243,8 +244,14 @@ run your `seed`, clone the Worker Databases, and remove everything at the end.
   Postgres 13 or later: see [Running against an existing server](setup.md#running-against-an-existing-server).
 - **Teardown.** When the run ends, or when setup fails partway, the harness drops its
   template and every Worker Database with `DROP DATABASE IF EXISTS … WITH (FORCE)`. It
-  never touches a database whose name it did not derive for this run. A run that is
-  killed before teardown leaves its databases behind.
+  never touches a database whose name it did not derive for this run.
+- **Killed runs.** A run that is killed before teardown leaves its databases behind. Every
+  database a run creates carries the comment `prisma-test-helper run <run id>`, and the
+  run holds an advisory lock keyed by that id, in the server's `postgres` database, for as
+  long as it lives. At startup, before creating anything, a run drops the marked
+  databases of every run whose lock is free (a dead run) and leaves those of a run still
+  going. It prints one line on stderr naming what it dropped. A database without the
+  comment is never dropped, whatever its name: see [Running against an existing server](setup.md#running-against-an-existing-server).
 - **No container tuning.** The container's tmpfs data directory, `fsync=off`,
   `synchronous_commit=off` and `full_page_writes=off` do not apply: the server's own
   settings decide how fast the suite runs.

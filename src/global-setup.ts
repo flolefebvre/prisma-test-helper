@@ -101,11 +101,15 @@ export interface CreateGlobalSetupOptions {
    * Connection URL of an existing Postgres server to run against instead of starting a
    * container. Any database on the server will do: the harness connects through it only
    * to create and drop the run's own databases, and never writes into it. The role must
-   * be a superuser, and the server Postgres 13 or later.
+   * be a superuser, the server Postgres 13 or later, and it must have a `postgres`
+   * database, where every run holds its lock whatever database the URL names.
    *
    * The run's Template Database is then `<databaseName>_<run id>` (8 hex characters), its
    * Worker Databases `<databaseName>_<run id>_1..N`, so several runs can share one
-   * server; teardown drops exactly those. The container's tuning does not apply: the
+   * server; teardown drops exactly those. Each is marked with the comment
+   * `prisma-test-helper run <run id>`, so that when a run is killed before its teardown,
+   * the next run on the server drops what it left at startup — only marked databases, and
+   * never those of a run still going. The container's tuning does not apply: the
    * server's own settings decide speed. Refused alongside `image` or `postgresSettings`.
    *
    * The `PRISMA_TEST_HELPER_URL` environment variable, when non-empty, overrides it. An
