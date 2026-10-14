@@ -240,6 +240,7 @@ describe("the harness schema", () => {
     ).toEqual([
       ["Category", 1, ["id", "name"]],
       ["Reading", 2, ["id", "at", "value"]],
+      ["Tag", 3, ["id", "name"]],
     ]);
   });
 
@@ -248,9 +249,10 @@ describe("the harness schema", () => {
       `SELECT (SELECT count(*)::int FROM prisma_test_helper.baseline) AS catalog,
               (SELECT count(*)::int FROM prisma_test_helper.sequence) AS sequences,
               (SELECT count(*)::int FROM prisma_test_helper.t1) AS category,
-              (SELECT count(*)::int FROM prisma_test_helper.t2) AS reading`,
+              (SELECT count(*)::int FROM prisma_test_helper.t2) AS reading,
+              (SELECT count(*)::int FROM prisma_test_helper.t3) AS tag`,
     );
 
-    expect(counts).toEqual({ catalog: 2, sequences: 2, category: 3, reading: 2 });
+    expect(counts).toEqual({ catalog: 3, sequences: 3, category: 3, reading: 2, tag: 2 });
   });
 });
