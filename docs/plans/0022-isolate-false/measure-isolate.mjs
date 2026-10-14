@@ -9,8 +9,9 @@
 //   node docs/plans/0022-isolate-false/measure-isolate.mjs
 //
 // Needs Docker. Not part of the gate. Everything is generated from the current `dist/`
-// into a scratch directory (SCRATCH, default a fresh one under the OS temp dir) whose
-// `node_modules` is a symlink to the repo's:
+// into a scratch directory (SCRATCH, default a fresh one under the OS temp dir; one that
+// is given is emptied first, and refused unless it is missing, empty, or one this script
+// made) whose `node_modules` is a symlink to the repo's:
 //
 // - The project: the repo's own Prisma schema and migrations, plus one benchmark-only
 //   migration of EXTRA_TABLES synthetic tables (default 67, which makes 73 tables like
@@ -55,8 +56,10 @@
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -79,7 +82,23 @@ const BASELINE_ROWS = Number(env("BASELINE_ROWS", 2000));
 const IMPORT_MS = Number(env("IMPORT_MS", 300));
 const DIRTY_PER_TEST = Math.min(8, EXTRA_TABLES);
 
+const SCRATCH_NAME = "bench-0022";
 const scratch = env("SCRATCH", "") || mkdtempSync(path.join(tmpdir(), "ptl-0022-"));
+/** Whether `dir` holds the package.json this script writes into its scratch directory. */
+function isOwnScratch(dir) {
+  try {
+    return JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")).name === SCRATCH_NAME;
+  } catch {
+    return false;
+  }
+}
+// The scratch directory is emptied first, so only one this script made — or an empty or
+// missing one — is accepted: SCRATCH=~ must not wipe a home directory.
+if (existsSync(scratch) && readdirSync(scratch).length > 0 && !isOwnScratch(scratch)) {
+  throw new Error(
+    `refusing to empty SCRATCH=${scratch}: it is not empty and holds no ${SCRATCH_NAME} package.json`,
+  );
+}
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(scratch, { recursive: true });
 const at = (...parts) => path.join(scratch, ...parts);
@@ -91,7 +110,7 @@ const write = (file, text) => {
 // --- The project -------------------------------------------------------------------------
 
 symlinkSync(path.join(repo, "node_modules"), at("node_modules"), "dir");
-write(at("package.json"), JSON.stringify({ name: "bench-0022", private: true, type: "module" }));
+write(at("package.json"), JSON.stringify({ name: SCRATCH_NAME, private: true, type: "module" }));
 cpSync(path.join(repo, "prisma"), at("prisma"), { recursive: true });
 cpSync(path.join(repo, "prisma.config.ts"), at("prisma.config.ts"));
 

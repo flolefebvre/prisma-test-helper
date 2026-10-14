@@ -96,9 +96,9 @@ for files that already exist.
 6. **Write or merge the setup file**, calling `setupWorkerDatabase()` first with no static
    app imports. If the app turns on TLS from an environment variable, override it right
    after: see [TLS](setup.md#tls). See [Per-worker setup](setup.md#4-per-worker-setup).
-7. **Merge the Vitest config**: the four settings, on the database project when there are
-   `projects`, plus alias resolution and the `server-only` alias when the project needs
-   them. If it set `pool: "threads"`, correct it and tell the user why; an existing
+7. **Merge the Vitest config**: the four settings (an existing `isolate` keeps its value),
+   on the database project when there are `projects`, plus alias resolution and the
+   `server-only` alias when the project needs them. If it set `pool: "threads"`, correct it and tell the user why; an existing
    `isolate: false` stays. See [Vitest config](setup.md#5-vitest-config).
 8. **Prove it works** with the two-test smoke test against a real model, and run the
    suite twice; both runs must pass with the second test genuinely running. On failure,

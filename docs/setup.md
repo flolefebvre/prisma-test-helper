@@ -374,9 +374,10 @@ export default defineConfig({
 ```
 
 **A config already exists** → merge, preserving every existing key. Add the four
-settings above, appending to `globalSetup` and `setupFiles` if they already hold entries.
-`tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any
-other setup file loads your app.
+settings above (an `isolate` the config already sets keeps its value), appending to
+`globalSetup` and `setupFiles` if they already hold entries. `tests/setup.ts` must come
+first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads your
+app.
 
 `pool: "forks"` is load-bearing: if an existing config sets `pool: "threads"`, correct it.
 `isolate: true` is the default the harness is documented and tuned for. An existing
@@ -458,8 +459,9 @@ export default defineConfig({
 The file path is deliberate: `server-only` exposes only `.` in its `exports` map, so the
 subpath specifier `server-only/empty.js` does not resolve.
 
-**Done when:** a single Vitest config carries all four settings alongside its original
-contents, its paths match the files from steps 3 and 4, and aliased imports resolve.
+**Done when:** a single Vitest config carries all four settings (`isolate` as the project
+had it, `true` otherwise) alongside its original contents, its paths match the files from
+steps 3 and 4, and aliased imports resolve.
 
 ## 6. Prove it works
 
