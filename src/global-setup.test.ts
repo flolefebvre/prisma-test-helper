@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, test, vi, type Mock } from "vitest";
 import type { TestProject } from "vitest/node";
 
 import { createGlobalSetup } from "./global-setup.js";
-import { cloneCommand } from "./worker-database.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -18,8 +17,6 @@ vi.mock("testcontainers", () => runtime);
 const postgres = vi.hoisted(() => {
   const started = {
     getConnectionUri: () => "postgresql://test:test@localhost:32768/prisma_test",
-    getUsername: () => "test",
-    exec: vi.fn(async () => ({ exitCode: 0, output: "" })),
     stop: vi.fn(async () => {}),
   };
   const images: string[] = [];
@@ -51,9 +48,44 @@ vi.mock("@testcontainers/postgresql", () => ({
   PostgreSqlContainer: postgres.PostgreSqlContainer,
 }));
 
+// A stand-in for pg's Client that records every connection it was opened with and
+// every query it was sent. `failOn` makes the query matching it reject the way pg does,
+// with Postgres's message.
+const pg = vi.hoisted(() => {
+  const connections: { connectionString: string; ssl?: unknown }[] = [];
+  const queries: string[] = [];
+  const ended = { count: 0, failWith: undefined as string | undefined };
+  const failure: { failOn?: string; message?: string } = {};
+  class Client {
+    constructor(config: { connectionString: string; ssl?: unknown }) {
+      connections.push(config);
+    }
+    async connect() {}
+    async query(sql: string) {
+      queries.push(sql);
+      if (failure.failOn !== undefined && sql.includes(failure.failOn)) {
+        throw new Error(failure.message);
+      }
+      return { rows: [] };
+    }
+    async end() {
+      ended.count++;
+      if (ended.failWith !== undefined) throw new Error(ended.failWith);
+    }
+  }
+  return { Client, connections, queries, ended, failure };
+});
+vi.mock("pg", () => ({ default: { Client: pg.Client } }));
+
 beforeEach(() => {
   postgres.images.length = 0;
   postgres.databases.length = 0;
+  pg.connections.length = 0;
+  pg.queries.length = 0;
+  pg.ended.count = 0;
+  pg.ended.failWith = undefined;
+  delete pg.failure.failOn;
+  delete pg.failure.message;
 });
 
 function projectWith(maxWorkers: number | undefined): TestProject {
@@ -85,14 +117,48 @@ describe("createGlobalSetup", () => {
 
     expect(postgres.images).toEqual(["postgres:16-alpine"]);
     expect(postgres.databases).toEqual(["acme_test"]);
-    expect(postgres.started.exec).toHaveBeenCalledWith(cloneCommand("acme_test", "test", 2));
+    expect(pg.queries).toEqual([
+      'CREATE DATABASE "acme_test_1" TEMPLATE "acme_test"',
+      'CREATE DATABASE "acme_test_2" TEMPLATE "acme_test"',
+    ]);
   });
 
-  test("clones one Worker Database per worker slot in a single exec", async () => {
+  // `CREATE DATABASE` refuses the implicit transaction of a multi-statement query, so
+  // every clone must be a query of its own.
+  test("clones one Worker Database per worker slot, one query each", async () => {
     await runSetup(undefined, projectWith(3));
 
-    expect(postgres.started.exec).toHaveBeenCalledTimes(1);
-    expect(postgres.started.exec).toHaveBeenCalledWith(cloneCommand("prisma_test", "test", 3));
+    expect(pg.queries).toEqual([
+      'CREATE DATABASE "prisma_test_1" TEMPLATE "prisma_test"',
+      'CREATE DATABASE "prisma_test_2" TEMPLATE "prisma_test"',
+      'CREATE DATABASE "prisma_test_3" TEMPLATE "prisma_test"',
+    ]);
+  });
+
+  // Anything connected to the template makes `CREATE DATABASE … TEMPLATE` fail
+  // (SQLSTATE 55006), so the admin connection goes to `postgres`, once.
+  test("clones over one admin connection to the postgres database", async () => {
+    await runSetup();
+
+    expect(pg.connections).toEqual([
+      expect.objectContaining({
+        connectionString: "postgresql://test:test@localhost:32768/postgres",
+      }),
+    ]);
+  });
+
+  // The container speaks plaintext. Left unset, pg would take TLS from the host's
+  // PGSSLMODE (`prefer` and `require` both mean TLS to pg) and fail to connect.
+  test("connects without TLS unless the URL asks for it", async () => {
+    await runSetup();
+
+    expect(pg.connections).toEqual([expect.objectContaining({ ssl: false })]);
+  });
+
+  test("closes the admin connection before the run starts", async () => {
+    await runSetup();
+
+    expect(pg.ended.count).toBe(1);
   });
 
   test("runs the consumer's prisma CLI with DATABASE_URL pointed at the container", async () => {
@@ -166,10 +232,34 @@ describe("createGlobalSetup", () => {
     await expect(runSetup()).rejects.toThrow(/P3018: migration failed/);
   });
 
-  test("surfaces the psql output when cloning fails, and stops the container", async () => {
-    postgres.started.exec.mockResolvedValueOnce({ exitCode: 1, output: "ERROR: already exists" });
+  test("names the failed Worker Database and Postgres's message, and stops the container", async () => {
+    pg.failure.failOn = '"prisma_test_2"';
+    pg.failure.message = 'database "prisma_test_2" already exists';
 
-    await expect(runSetup()).rejects.toThrow(/ERROR: already exists/);
+    await expect(runSetup()).rejects.toMatchObject({
+      message:
+        "cloning the Worker Databases from prisma_test failed at prisma_test_2: " +
+        'database "prisma_test_2" already exists',
+      cause: expect.objectContaining({ message: 'database "prisma_test_2" already exists' }),
+    });
+    expect(pg.queries).toHaveLength(2);
+    expect(postgres.started.stop).toHaveBeenCalledTimes(1);
+  });
+
+  test("closes the admin connection when a clone fails", async () => {
+    pg.failure.failOn = '"prisma_test_1"';
+    pg.failure.message = "boom";
+
+    await expect(runSetup()).rejects.toThrow(/boom/);
+    expect(pg.ended.count).toBe(1);
+  });
+
+  test("keeps the clone error when closing the admin connection also fails", async () => {
+    pg.failure.failOn = '"prisma_test_1"';
+    pg.failure.message = 'database "prisma_test_1" already exists';
+    pg.ended.failWith = "Connection terminated unexpectedly";
+
+    await expect(runSetup()).rejects.toThrow(/failed at prisma_test_1: .*already exists/);
     expect(postgres.started.stop).toHaveBeenCalledTimes(1);
   });
 });

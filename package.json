@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@testcontainers/postgresql": "^12.0.4",
+    "pg": "^8.23.1",
     "testcontainers": "^12.0.4"
   },
   "peerDependencies": {
@@ -70,6 +71,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.6.0",
     "jscpd": "^5.0.12",
     "prettier": "^3.9.4",

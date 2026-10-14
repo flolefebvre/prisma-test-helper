@@ -1,8 +1,8 @@
 // The pure half of Worker Database provisioning and addressing: how many Worker
-// Databases a run needs, the psql argv that clones them from the Template Database, and
-// the URI a worker connects through. No container, no I/O — the global setup and the
-// per-worker setup feed these from Vitest and Testcontainers, so each piece is exercised
-// exhaustively without Docker.
+// Databases a run needs, the SQL that clones them from the Template Database, and the
+// URIs the admin connection and each worker connect through. No container, no I/O — the
+// global setup and the per-worker setup feed these from Vitest and Testcontainers, so
+// each piece is exercised exhaustively without a database.
 
 import os from "node:os";
 
@@ -27,34 +27,52 @@ export function workerCount(project: TestProject): number {
   return project.config.maxWorkers || project.vitest.config.maxWorkers || os.availableParallelism();
 }
 
-/**
- * The psql argv that clones every Worker Database (`<databaseName>_1..count`) from the
- * template in a single invocation. Each clone is its own `--command` flag: psql runs a
- * multi-statement `--command` in an implicit transaction, and `CREATE DATABASE` refuses
- * to run inside one. `ON_ERROR_STOP` makes the first failed clone abort the invocation
- * with a non-zero exit, since psql otherwise continues past errors and exits 0.
- *
- * @example
- * cloneCommand("prisma_test", "postgres", 2)
- * // → ["psql", "--username", "postgres", "--dbname", "postgres",
- * //    "--set", "ON_ERROR_STOP=1",
- * //    "--command", 'CREATE DATABASE "prisma_test_1" TEMPLATE "prisma_test"',
- * //    "--command", 'CREATE DATABASE "prisma_test_2" TEMPLATE "prisma_test"']
- */
-export function cloneCommand(databaseName: string, username: string, count: number): string[] {
-  const argv = ["psql", "--username", username, "--dbname", "postgres", "--set", "ON_ERROR_STOP=1"];
-  for (let workerId = 1; workerId <= count; workerId++) {
-    argv.push(
-      "--command",
-      `CREATE DATABASE "${databaseName}_${workerId}" TEMPLATE "${databaseName}"`,
-    );
-  }
-  return argv;
+/** One Worker Database to clone, and the statement that clones it. */
+export interface CloneStatement {
+  /** Name of the Worker Database the statement creates: `<databaseName>_<n>`. */
+  workerDatabase: string;
+  statement: string;
 }
 
 /**
- * Swap the database in a connection URI for this worker's clone, keeping everything
- * else — credentials, host, port, query parameters — untouched.
+ * The statements that clone every Worker Database (`<databaseName>_1..count`) from the
+ * template, one per worker slot. Each must be sent as its own simple query: a
+ * multi-statement string runs in an implicit transaction, and `CREATE DATABASE` refuses
+ * to run inside one. Each carries the database it creates, so a failure can name it.
+ *
+ * @example
+ * cloneStatements("prisma_test", 2)
+ * // → [{ workerDatabase: "prisma_test_1",
+ * //      statement: 'CREATE DATABASE "prisma_test_1" TEMPLATE "prisma_test"' },
+ * //    { workerDatabase: "prisma_test_2",
+ * //      statement: 'CREATE DATABASE "prisma_test_2" TEMPLATE "prisma_test"' }]
+ */
+export function cloneStatements(databaseName: string, count: number): CloneStatement[] {
+  return Array.from({ length: count }, (_, index) => {
+    const workerDatabase = `${databaseName}_${index + 1}`;
+    return {
+      workerDatabase,
+      statement: `CREATE DATABASE "${workerDatabase}" TEMPLATE "${databaseName}"`,
+    };
+  });
+}
+
+/**
+ * Swap the database in a connection URI, keeping everything else — credentials, host,
+ * port, query parameters — untouched.
+ *
+ * @example
+ * databaseUrl("postgresql://u:p@host:5432/prisma_test", "postgres");
+ * // → "postgresql://u:p@host:5432/postgres"
+ */
+export function databaseUrl(uri: string, database: string): string {
+  const url = new URL(uri);
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+/**
+ * Swap the database in a connection URI for this worker's clone (see {@link databaseUrl}).
  *
  * @example
  * workerDatabaseUrl("postgresql://u:p@host:5432/prisma_test", "prisma_test", "1");
@@ -65,7 +83,5 @@ export function workerDatabaseUrl(
   databaseName: string,
   poolId: string,
 ): string {
-  const url = new URL(templateUri);
-  url.pathname = `/${databaseName}_${poolId}`;
-  return url.toString();
+  return databaseUrl(templateUri, `${databaseName}_${poolId}`);
 }

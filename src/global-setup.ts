@@ -2,14 +2,15 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { getContainerRuntimeClient } from "testcontainers";
 // Brings the "vitest" module into the program so the ProvidedContext augmentation
 // below attaches to it; erased from the emitted JS.
 import type {} from "vitest";
 import type { TestProject } from "vitest/node";
 
-import { cloneCommand, workerCount } from "./worker-database.js";
+import { withAdminConnection } from "./admin-connection.js";
+import { cloneStatements, databaseUrl, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
   interface ProvidedContext {
@@ -58,10 +59,11 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
  * fork finds its database already provisioned.
  *
- * The clones run here, in one psql invocation, while nothing else is connected to
- * the template. `CREATE DATABASE … TEMPLATE` fails when the template has other
- * connections (SQLSTATE 55006), which is why cloning from inside workers would
- * need a lock; cloning before workers exist needs none.
+ * The clones run here, over one admin connection to the `postgres` database that is
+ * closed before this returns, while nothing is connected to the template.
+ * `CREATE DATABASE … TEMPLATE` fails when the template has other connections
+ * (SQLSTATE 55006), which is why cloning from inside workers would need a lock;
+ * cloning before workers exist needs none.
  */
 export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
   const { image = "postgres:18-alpine", databaseName = "prisma_test" } = options;
@@ -86,7 +88,11 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
 
     try {
       migrate(container.getConnectionUri());
-      await cloneWorkerDatabases(container, databaseName, workerCount(project));
+      await cloneWorkerDatabases(
+        databaseUrl(container.getConnectionUri(), "postgres"),
+        databaseName,
+        workerCount(project),
+      );
     } catch (error) {
       // A failed stop (e.g. the daemon died, failing migrate and stop alike) must not
       // mask the diagnostic error being thrown; Ryuk reaps the container regardless.
@@ -173,20 +179,33 @@ function resolvePrismaBin(): string {
 }
 
 /**
- * Clone the migrated template into the Worker Databases, via `psql` inside the
- * container — over the local socket, which the official image trusts, so no
- * client library or credentials are involved. One exec covers every clone: the
- * exec round-trip costs more than the clone itself.
+ * Clone the migrated template into the Worker Databases, over an admin connection to
+ * `adminUrl` — the `postgres` database, never the template, which must have no
+ * connections while it is cloned.
+ *
+ * It goes through `pg` from this process, not a client inside the container, because
+ * that is the harness's one SQL path: it can return rows, which the Baseline snapshot
+ * (#38) reads back, and it needs no container to run in, which the `url` mode (#44)
+ * lacks. Each clone is its own query — `CREATE DATABASE` refuses to run in the implicit
+ * transaction of a multi-statement string — and the first failure stops the run,
+ * naming the Worker Database that failed.
  */
 async function cloneWorkerDatabases(
-  postgres: StartedPostgreSqlContainer,
+  adminUrl: string,
   databaseName: string,
   count: number,
 ): Promise<void> {
-  const { exitCode, output } = await postgres.exec(
-    cloneCommand(databaseName, postgres.getUsername(), count),
-  );
-  if (exitCode !== 0) {
-    throw new Error(`cloning the Worker Databases from ${databaseName} failed:\n${output}`);
-  }
+  await withAdminConnection(adminUrl, async (connection) => {
+    for (const { workerDatabase, statement } of cloneStatements(databaseName, count)) {
+      try {
+        await connection.query(statement);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        throw new Error(
+          `cloning the Worker Databases from ${databaseName} failed at ${workerDatabase}: ${message}`,
+          { cause },
+        );
+      }
+    }
+  });
 }
