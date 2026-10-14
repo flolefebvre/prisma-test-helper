@@ -28,8 +28,13 @@ Prisma client your app uses. It registers:
   file on this worker left behind;
 - a `beforeEach` that runs the Reset Hooks;
 - an `afterEach` that runs the Reset after every test;
-- an `afterAll` that vacuums the tables the file wrote to, so the next file's first
-  Reset stays cheap. That `VACUUM` is best effort: it never fails the file.
+- an `afterAll` that vacuums the tables the file wrote to and every Baseline table, so
+  the next file's Resets stay cheap. That `VACUUM` is best effort: it never fails the
+  file.
+
+The Reset empties every table but the Baseline tables, the ones your migrations left
+rows in, which it restores when a test wrote to them: see
+[Rows your migrations insert](writing-tests.md#rows-your-migrations-insert).
 
 It refuses, synchronously and before registering anything, unless `DATABASE_URL` names a
 Worker Database (`<databaseName>_<pool id>`). Its `beforeAll` also refuses a client
@@ -64,7 +69,8 @@ function registerResetHook(hook: ResetHook): void;
 ```
 
 Registers a callback to run in every `beforeEach`, before the test body, against a
-database the previous Reset already emptied. Call it at module scope of a fixture file.
+database the previous Reset already returned to its Baseline. Call it at module scope of
+a fixture file.
 Hooks are held in a `Set`, so registering the same function twice runs it once. They run
 sequentially, in registration order, and are awaited. See
 [Fixtures and seeded fake data](writing-tests.md#fixtures-and-seeded-fake-data).

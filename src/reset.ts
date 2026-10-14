@@ -1,11 +1,13 @@
-// The Reset: the pass that returns a Worker Database to empty, once before a file's
+// The Reset: the pass that returns a Worker Database to its Baseline — every table
+// empty but those the migrations left rows in, which it restores — once before a file's
 // first test and once after every test. Tests commit for real, so this is what keeps
 // one test's rows out of the next. It runs through the consumer's own Prisma client —
 // structurally typed below, never imported — so the package needs no database driver
 // and the statement lands on the connection the tests themselves use.
 //
 // Why DELETE and not TRUNCATE, why the DELETEs are gated on a storage probe, why a
-// VACUUM runs between files, and the numbers behind all three: docs/adr/0001.
+// VACUUM runs between files, and the numbers behind all three: docs/adr/0001. How the
+// Baseline is tracked and restored: docs/adr/0002-baseline-restore.md.
 
 import {
   CATALOG,

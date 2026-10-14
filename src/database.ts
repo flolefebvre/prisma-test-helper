@@ -46,7 +46,8 @@ const resetHooks = new Set<ResetHook>();
 
 /**
  * Register a callback to run in every `beforeEach`, before the test body, against a
- * database the previous Reset already emptied.
+ * database the previous Reset already returned to its Baseline: empty, but for the rows
+ * the migrations inserted.
  *
  * This is the seam factories plug into: reset a per-test sequence counter, seed faker
  * from `seed`, or anything else that must be fresh per test. Hooks are held in a Set, so
@@ -67,11 +68,13 @@ export function registerResetHook(hook: ResetHook): void {
  * Opt a test file into the database. Call it once, at the top of the file, with the
  * Prisma client your app uses.
  *
- * Tests commit for real; the Reset returns the Worker Database to empty around them. A
+ * Tests commit for real; the Reset returns the Worker Database to its Baseline around
+ * them — every table empty but those the migrations left rows in, which it restores. A
  * `beforeAll` runs it once, so the file starts clean whatever an earlier file on this
  * worker left behind, and an `afterEach` runs it after every test. A `beforeEach` runs
- * the Reset Hooks. An `afterAll` vacuums the tables the file wrote to, which keeps the
- * next file's first Reset cheap; it is best effort and never fails the file.
+ * the Reset Hooks. An `afterAll` vacuums the tables the file wrote to and every Baseline
+ * table, which keeps the next file's Resets cheap; it is best effort and never fails the
+ * file.
  *
  * It refuses — synchronously, before registering anything — unless `DATABASE_URL` names
  * a Worker Database: with real commits, a misrouted suite would empty a real database.
@@ -149,7 +152,8 @@ export function registerDatabase(
 
   afterAll(async () => {
     // Returns the heaps this file wrote to 0 bytes, so the next file's first Reset on a
-    // fresh backend skips those tables unopened. Never rejects; unset as above.
+    // fresh backend skips those tables unopened, and clears the dead rows Baseline
+    // restores left. Never rejects; unset as above.
     await prepared?.vacuum();
   });
 }

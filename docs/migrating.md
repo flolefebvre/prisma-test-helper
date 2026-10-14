@@ -7,7 +7,7 @@ Version-to-version upgrade notes. Only read the section for the jump you are mak
 1.0 replaces the per-test rollback transaction with commit-and-reset: tests commit to
 their Worker Database for real, through your app's own Prisma client, and the **Reset**
 empties every table and rewinds every sequence before a file's first test and after
-every test. Why:
+every test, keeping the rows your migrations insert. Why:
 [ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
 
 Your setup file and every database test file change. `vitest.config.ts` and
@@ -111,12 +111,20 @@ Every write commits, so a test sees exactly what production would:
   moment it is written; transactions fired with `Promise.all` run in parallel instead of
   one after another. Flip or delete any assertion that a test's writes are invisible
   outside it, or never reach the database.
-- **Rows your migrations insert are emptied too.** The Reset empties every table but
-  `_prisma_migrations` and extension-owned tables such as PostGIS's `spatial_ref_sys`.
-  Reference data a migration inserts is gone before the first test: re-create it in a
-  [Reset Hook](writing-tests.md#fixtures-and-seeded-fake-data), the test or a factory.
-- **Ids restart at 1 in every test.** The Reset rewinds every column-owned sequence; in
-  0.3 they kept climbing across tests.
+- **Rows your migrations insert are still there in every test**, as in 0.3. The tables
+  that hold rows after migrate form the **Baseline**, and the Reset restores a
+  Baseline table, instead of emptying it, whenever a test wrote to it: inserted,
+  updated, deleted or truncated. A partitioned Baseline table is restored after every
+  test. A test that wants those rows gone deletes them itself, and the next Reset
+  brings them back. See
+  [Rows your migrations insert](writing-tests.md#rows-your-migrations-insert).
+- **Ids restart in every test.** The Reset rewinds every column-owned sequence. A
+  sequence owned by an empty table restarts at 1. A sequence owned by a Baseline table
+  goes back to where the migrations left it, so the next insert gets the id after the
+  last migration row. In 0.3 they kept climbing across tests.
+- **The harness owns a `prisma_test_helper` schema** in every Worker Database: the
+  Baseline's snapshot and bookkeeping. Discovery skips it, and your migrations must not
+  create a schema by that name.
 
 Workarounds the rollback model forced, which you can now remove:
 
