@@ -16,7 +16,7 @@ Your setup file and every database test file change. `vitest.config.ts` and
 ### Requirements
 
 - **Vitest ^5.0.3** (was ^4.0.0). Upgrade Vitest first.
-- **Node ^22.12, ^24 or >= 26** (was >= 20), as Vitest 5 requires.
+- **Node ^22.22, ^24 or >= 26** (was >= 20), as Vitest 5 and Testcontainers require.
 - **The default image is `postgres:18-alpine`** (was `postgres:17-alpine`). If you rely on
   the default, your tests move from Postgres 17 to 18. To stay on 17, pin it:
   `createGlobalSetup({ image: "postgres:17-alpine" })`. If you already pass `image`,

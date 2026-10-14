@@ -85,9 +85,10 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 
 ## Requirements
 
-- **Node ^22.12, ^24 or >= 26**, as Vitest 5 requires. The package ships ESM only, but
-  your project need not be — the wiring runs under Vitest, which transforms modules
-  through Vite, so a CommonJS project (a stock Next.js app, say) works too.
+- **Node ^22.22, ^24 or >= 26**, as Vitest 5 and Testcontainers require. The package
+  ships ESM only, but your project need not be — the wiring runs under Vitest, which
+  transforms modules through Vite, so a CommonJS project (a stock Next.js app, say) works
+  too.
 - **Docker** (or another container runtime Testcontainers can reach), or an existing
   Postgres 13+ server you point the run at with the
   [`url` option](docs/api.md#the-url-option) or `PRISMA_TEST_HELPER_URL`.

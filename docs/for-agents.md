@@ -69,7 +69,7 @@ Each step links the section of [Setup](setup.md) that holds its code and its mer
 for files that already exist.
 
 1. **Preflight.** Confirm `prisma` and `@prisma/client` ^7, `vitest` ^5.0.3, Node
-   ^22.12, ^24 or >= 26, committed migrations, and `docker info`. Report every failing
+   ^22.22, ^24 or >= 26, committed migrations, and `docker info`. Report every failing
    requirement before touching a file; on too-old versions, stop. A CommonJS project is
    fine. See [Before you start](setup.md#before-you-start).
 2. **Install** `@flefebvre/prisma-test-helper` as a dev dependency with the package
