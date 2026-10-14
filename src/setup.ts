@@ -1,10 +1,12 @@
 import { inject } from "vitest";
 
+import { beginFile } from "./opt-in.js";
 import { workerDatabaseUrl } from "./worker-database.js";
 
 // The `/setup` entry: what a consumer's Vitest `setupFiles` module imports. It runs
 // once per test file, inside the worker, before any app module loads — see the ordering
-// note on `setupWorkerDatabase`.
+// note on `setupWorkerDatabase` — under `isolate: false` as under `isolate: true`, which
+// makes it where a file's opt-in state starts (./opt-in.ts).
 
 /**
  * What {@link setupWorkerDatabase} hands back. The harness itself reads both through the
@@ -38,6 +40,10 @@ export interface WorkerDatabase {
  * setupWorkerDatabase();
  */
 export function setupWorkerDatabase(): WorkerDatabase {
+  // First, before any check can throw: this call is the start of a test file, under
+  // `isolate: false` too, where the worker's modules outlive the previous file.
+  beginFile();
+
   const poolId = process.env.VITEST_POOL_ID;
   if (!poolId) {
     throw new Error(

@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, inject } from "vitest";
 
+import { isOptedIn, markOptedIn } from "./opt-in.js";
 import {
   assertWorkerDatabase,
   prepareReset,
@@ -22,10 +23,11 @@ export interface ResetHookContext {
 /** A callback registered with {@link registerResetHook}. May be async; it is awaited. */
 export type ResetHook = (context: ResetHookContext) => void | Promise<void>;
 
-// Vitest isolates test files (`isolate: true`), so this module is re-instantiated per
-// file: the flag below resets for each, and hooks registered by one file's imports never
-// leak into another's.
-let databaseSetUp = false;
+// Whether this file opted in lives in ./opt-in.js, which the `/setup` entry clears at the
+// start of every file — so it is per file under `isolate: true` (this module is new per
+// file) and under `isolate: false` (this module serves every file on its worker) alike.
+// The Reset Hooks below are per module instance instead: per file under `isolate: true`,
+// per worker under `isolate: false`, where a hook registered by one file carries over.
 
 /**
  * Whether {@link setupDatabase} has run in this test file.
@@ -39,7 +41,7 @@ let databaseSetUp = false;
  * }
  */
 export function isDatabaseSetUp(): boolean {
-  return databaseSetUp;
+  return isOptedIn();
 }
 
 const resetHooks = new Set<ResetHook>();
@@ -114,7 +116,7 @@ export function registerDatabase(
   databaseUrl: string | undefined,
   templateName: string | undefined,
 ): void {
-  if (databaseSetUp) {
+  if (isOptedIn()) {
     throw new Error(
       "setupDatabase() was called twice in this file — call it once, at the top of the file",
     );
@@ -127,7 +129,7 @@ export function registerDatabase(
     );
   }
   assertWorkerDatabase(databaseUrl, templateName);
-  databaseSetUp = true;
+  markOptedIn();
 
   let prepared: PreparedReset | undefined;
 
