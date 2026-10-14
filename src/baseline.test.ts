@@ -8,6 +8,7 @@ import {
   snapshotStatement,
   TABLES_CTE,
   type BaselineCandidate,
+  type BaselinePlan,
 } from "./baseline.js";
 import { DISCOVERY_QUERY } from "./reset.js";
 
@@ -31,6 +32,15 @@ const sequence = (name: string, owner: string): BaselineCandidate => ({
   owner_schema: "public",
   owner_name: owner,
 });
+
+// The fixture's Baseline: a lookup table, its sequence, and a partitioned table.
+const PLAN: BaselinePlan = {
+  tables: [
+    { schema: "public", name: "Category", relkind: "r" },
+    { schema: "public", name: "Reading", relkind: "p" },
+  ],
+  sequences: [{ schema: "public", name: "Category_id_seq" }],
+};
 
 describe("which tables count", () => {
   // One definition, shared: a drifted copy would snapshot a table the Reset does not
@@ -98,13 +108,7 @@ describe("planBaseline", () => {
   ];
 
   test("keeps the non-empty tables, in order, and the sequences they own", () => {
-    expect(planBaseline(candidates, [2, 1])).toEqual({
-      tables: [
-        { schema: "public", name: "Category", relkind: "r" },
-        { schema: "public", name: "Reading", relkind: "p" },
-      ],
-      sequences: [{ schema: "public", name: "Category_id_seq" }],
-    });
+    expect(planBaseline(candidates, [2, 1])).toEqual(PLAN);
   });
 
   test("is empty when every table is", () => {
@@ -113,13 +117,7 @@ describe("planBaseline", () => {
 });
 
 describe("snapshotStatement", () => {
-  const statement = snapshotStatement({
-    tables: [
-      { schema: "public", name: "Category", relkind: "r" },
-      { schema: "public", name: "Reading", relkind: "p" },
-    ],
-    sequences: [{ schema: "public", name: "Category_id_seq" }],
-  })!;
+  const statement = snapshotStatement(PLAN)!;
 
   test("copies each table by ordinal, so no long name can collide with another", () => {
     expect(statement).toContain(
