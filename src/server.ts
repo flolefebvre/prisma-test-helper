@@ -4,6 +4,12 @@
 // drop what the run created. No container, no connection — the global setup hands these
 // to the server providers (`./container-server.js`, `./url-server.js`), so each piece is
 // exercised without a database.
+//
+// A url-mode run can be killed before its teardown, leaving its databases on a server
+// that outlives it. So every database it creates carries a Run marker (a comment naming
+// its run id), and the run holds an advisory lock keyed by that id for as long as it
+// lives. The next run's Sweep drops the marked databases of every run whose lock is free —
+// a dead one — and never a database without a marker, whatever its name.
 
 import { randomBytes } from "node:crypto";
 
@@ -23,6 +29,12 @@ export interface ServerHandle {
   adminUrl: string;
   /** Release everything the run holds on the server. */
   teardown(): Promise<void>;
+  /**
+   * The statement that marks a database the run just created as its own, sent by the
+   * pipeline right after each clone on the same connection. Only a server other runs may
+   * share needs one: a container dies with its run, so its provider leaves this unset.
+   */
+  markStatement?(database: string): string;
 }
 
 /** The environment variable that points a run at an existing server, over the option. */
@@ -197,6 +209,16 @@ export function assertServerUsable(check: ServerCheck, server: string): void {
   }
 }
 
+/**
+ * The statement that drops `database`. `IF EXISTS` makes it safe whatever got created;
+ * `WITH (FORCE)` ends sessions a test (or a killed run's workers) left open. Send it as its
+ * own query: `DROP DATABASE` refuses to run in the implicit transaction of a
+ * multi-statement string.
+ */
+export function dropDatabaseStatement(database: string): string {
+  return `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`;
+}
+
 /** One database to drop, and the statement that drops it. */
 export interface DropStatement {
   database: string;
@@ -222,8 +244,137 @@ export function dropStatements(templateName: string, count: number): DropStateme
     ...Array.from({ length: count }, (_, index) => `${templateName}_${index + 1}`),
     templateName,
   ];
-  return databases.map((database) => ({
-    database,
-    statement: `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`,
-  }));
+  return databases.map((database) => ({ database, statement: dropDatabaseStatement(database) }));
+}
+
+/** What every Run marker starts with; the run id follows. */
+const MARKER_PREFIX = "prisma-test-helper run ";
+
+/**
+ * The Run marker of a run: the comment every database it creates carries. A comment lives
+ * in `pg_shdescription`, keyed by the database's OID, so a clone made with
+ * `CREATE DATABASE … TEMPLATE` does not inherit its template's: each is marked itself.
+ *
+ * @example
+ * runMarker("0a1b2c3d"); // → "prisma-test-helper run 0a1b2c3d"
+ */
+export function runMarker(runId: string): string {
+  return `${MARKER_PREFIX}${runId}`;
+}
+
+/**
+ * The statement that marks `database` as created by the run `runId`. Postgres lets only
+ * the database's owner comment on it, which the run is: it created it.
+ *
+ * @example
+ * markStatement("prisma_test_0a1b2c3d", "0a1b2c3d");
+ * // → `COMMENT ON DATABASE "prisma_test_0a1b2c3d" IS 'prisma-test-helper run 0a1b2c3d'`
+ */
+export function markStatement(database: string, runId: string): string {
+  return `COMMENT ON DATABASE "${database}" IS '${runMarker(runId)}'`;
+}
+
+/**
+ * The run id a comment marks, or `undefined` when it is not exactly a Run marker — a
+ * comment someone else wrote that merely starts like one names no run, so the Sweep
+ * leaves its database alone.
+ */
+export function parseRunMarker(comment: string | null): string | undefined {
+  return /^prisma-test-helper run ([0-9a-f]{8})$/.exec(comment ?? "")?.[1];
+}
+
+/** Every database on the server whose comment looks like a Run marker, in one read. */
+export const MARKED_DATABASES_QUERY =
+  "SELECT datname, shobj_description(oid, 'pg_database') AS marker FROM pg_database " +
+  `WHERE shobj_description(oid, 'pg_database') LIKE '${MARKER_PREFIX}%' ORDER BY datname`;
+
+/** One row of {@link MARKED_DATABASES_QUERY}. */
+export interface MarkedDatabase extends Record<string, unknown> {
+  datname: string;
+  marker: string | null;
+}
+
+/**
+ * The marked databases grouped by the run that created them, minus `ownRunId`'s, in the
+ * order listed. A row whose marker does not parse is dropped from the plan.
+ */
+export function leftoversByRun(rows: MarkedDatabase[], ownRunId: string): Map<string, string[]> {
+  const byRun = new Map<string, string[]>();
+  for (const { datname, marker } of rows) {
+    const runId = parseRunMarker(marker);
+    if (runId === undefined || runId === ownRunId) continue;
+    byRun.set(runId, [...(byRun.get(runId) ?? []), datname]);
+  }
+  return byRun;
+}
+
+/**
+ * The harness's advisory-lock namespace: the first key of every lock it takes, so its
+ * locks never collide with an application's that use the two-key form. "pth\0" in ASCII.
+ */
+export const RUN_LOCK_NAMESPACE = 0x70746800;
+
+/**
+ * The second advisory-lock key of a run: its 32-bit run id read as a signed `int4`, which
+ * is what Postgres takes. A bijection, so two runs never share a lock.
+ *
+ * @example
+ * runLockKey("0000002a"); // → 42
+ * runLockKey("ffffffff"); // → -1
+ */
+export function runLockKey(runId: string): number {
+  return Number.parseInt(runId, 16) | 0;
+}
+
+/**
+ * The statement a run sends to hold its own lock for as long as its admin session lives.
+ * Session-level: Postgres releases it when the connection ends, however the run ends.
+ */
+export function runLockStatement(runId: string): string {
+  return `SELECT pg_advisory_lock(${RUN_LOCK_NAMESPACE}, ${runLockKey(runId)})`;
+}
+
+/**
+ * The statement that tries another run's lock without waiting: `locked` is true only
+ * when no live session holds it, i.e. that run is dead.
+ */
+export function tryRunLockStatement(runId: string): string {
+  return `SELECT pg_try_advisory_lock(${RUN_LOCK_NAMESPACE}, ${runLockKey(runId)}) AS locked`;
+}
+
+/** The statement that releases a lock {@link tryRunLockStatement} took. */
+export function runUnlockStatement(runId: string): string {
+  return `SELECT pg_advisory_unlock(${RUN_LOCK_NAMESPACE}, ${runLockKey(runId)})`;
+}
+
+/** The line the Sweep prints when it dropped a dead run's databases. */
+export function sweptMessage(server: string, databases: string[]): string {
+  return (
+    `@flefebvre/prisma-test-helper: dropped databases left on ${server} by a run that ` +
+    `was killed: ${databases.join(", ")}`
+  );
+}
+
+/**
+ * The line the Sweep prints for a dead run's databases it could not drop. Each entry is
+ * `<name> (<Postgres's message>)`. They are another run's leftovers, so this run goes on.
+ */
+export function sweepFailedMessage(server: string, failures: string[]): string {
+  return (
+    `@flefebvre/prisma-test-helper: could not drop databases left on ${server} by a run ` +
+    `that was killed: ${failures.join(", ")} — this run goes on; drop them by hand with ` +
+    'DROP DATABASE "<name>" WITH (FORCE)'
+  );
+}
+
+/**
+ * The line printed when the connection holding the run's lock drops mid-run: from then
+ * on, the next run to start on that server takes this run for dead.
+ */
+export function lostLockMessage(server: string, reason: string): string {
+  return (
+    `@flefebvre/prisma-test-helper: lost the admin connection to ${server} (${reason}) — ` +
+    "this run no longer holds its lock, so a run starting on that server now may drop " +
+    "this run's databases"
+  );
 }

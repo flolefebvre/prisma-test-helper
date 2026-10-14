@@ -3,18 +3,32 @@ import { describe, expect, test } from "vitest";
 import {
   assertNamesFit,
   assertServerUsable,
+  dropDatabaseStatement,
   dropStatements,
   ignoredOptionsWarning,
+  leftoversByRun,
+  lostLockMessage,
+  MARKED_DATABASES_QUERY,
+  markStatement,
   newRunId,
+  parseRunMarker,
   redactUrl,
   resolveServerMode,
+  RUN_LOCK_NAMESPACE,
+  runLockKey,
+  runLockStatement,
+  runMarker,
   runTemplateName,
+  runUnlockStatement,
+  sweepFailedMessage,
+  sweptMessage,
+  tryRunLockStatement,
   type ServerCheck,
 } from "./server.js";
 
 // The pure half of choosing and addressing the run's server, exercised without one: the
-// mode and its conflicts, the names a run on a shared server derives, the startup checks
-// and the teardown statements.
+// mode and its conflicts, the names a run on a shared server derives, the startup checks,
+// the teardown statements, and the Run markers, locks and lines of the Sweep.
 
 const SERVER = "postgresql://app:secret@db:5432/postgres";
 const OTHER = "postgresql://dev:pw@localhost:5433/app";
@@ -196,4 +210,135 @@ test("dropStatements drops every Worker Database, then the template, and nothing
       statement: 'DROP DATABASE IF EXISTS "prisma_test_0a1b2c3d" WITH (FORCE)',
     },
   ]);
+});
+
+describe("Run markers", () => {
+  test("a marker names the run id after the harness's prefix", () => {
+    expect(runMarker("0a1b2c3d")).toBe("prisma-test-helper run 0a1b2c3d");
+  });
+
+  test("marks a database with its run's marker", () => {
+    expect(markStatement("prisma_test_0a1b2c3d_1", "0a1b2c3d")).toBe(
+      `COMMENT ON DATABASE "prisma_test_0a1b2c3d_1" IS 'prisma-test-helper run 0a1b2c3d'`,
+    );
+  });
+
+  test("reads the run id back from a marker", () => {
+    const runId = newRunId();
+
+    expect(parseRunMarker(runMarker(runId))).toBe(runId);
+  });
+
+  test.each([
+    ["no comment", null],
+    ["another comment", "dev database, do not drop"],
+    ["a marker with something appended", "prisma-test-helper run 0a1b2c3d (kept)"],
+    ["a run id that is not 8 lowercase hex", "prisma-test-helper run 0A1B2C3D"],
+    ["a run id too short", "prisma-test-helper run 0a1b2c3"],
+  ])("names no run for %s", (_, comment) => {
+    expect(parseRunMarker(comment)).toBeUndefined();
+  });
+
+  test("the listing reads each database's comment, filtered to the harness's prefix", () => {
+    expect(MARKED_DATABASES_QUERY).toBe(
+      "SELECT datname, shobj_description(oid, 'pg_database') AS marker FROM pg_database " +
+        "WHERE shobj_description(oid, 'pg_database') LIKE 'prisma-test-helper run %' " +
+        "ORDER BY datname",
+    );
+  });
+});
+
+describe("leftoversByRun", () => {
+  test("groups the marked databases by run, in the order listed", () => {
+    const rows = [
+      { datname: "app_test_0a1b2c3d", marker: runMarker("0a1b2c3d") },
+      { datname: "prisma_test_ffffffff", marker: runMarker("ffffffff") },
+      { datname: "app_test_0a1b2c3d_1", marker: runMarker("0a1b2c3d") },
+    ];
+
+    expect(leftoversByRun(rows, "12345678")).toEqual(
+      new Map([
+        ["0a1b2c3d", ["app_test_0a1b2c3d", "app_test_0a1b2c3d_1"]],
+        ["ffffffff", ["prisma_test_ffffffff"]],
+      ]),
+    );
+  });
+
+  test("leaves out the run's own databases and any marker that does not parse", () => {
+    const rows = [
+      { datname: "prisma_test_12345678", marker: runMarker("12345678") },
+      { datname: "prisma_test_0a1b2c3d", marker: "prisma-test-helper run 0a1b2c3d (kept)" },
+      { datname: "prisma_test_0b1b2c3d", marker: null },
+    ];
+
+    expect(leftoversByRun(rows, "12345678")).toEqual(new Map());
+  });
+});
+
+describe("run locks", () => {
+  test("the namespace is one fixed int4", () => {
+    expect(RUN_LOCK_NAMESPACE).toBe(1886676992);
+    expect(RUN_LOCK_NAMESPACE | 0).toBe(RUN_LOCK_NAMESPACE);
+  });
+
+  test.each([
+    ["00000000", 0],
+    ["0000002a", 42],
+    ["7fffffff", 2147483647],
+    // From 0x80000000 the 32 bits read as a negative int4: the key wraps, it never overflows.
+    ["80000000", -2147483648],
+    ["ffffffff", -1],
+    ["deadbeef", -559038737],
+  ])("run id %s locks on key %i", (runId, key) => {
+    expect(runLockKey(runId)).toBe(key);
+  });
+
+  test("every key fits an int4", () => {
+    for (let i = 0; i < 100; i++) {
+      const key = runLockKey(newRunId());
+      expect(key).toBeGreaterThanOrEqual(-(2 ** 31));
+      expect(key).toBeLessThan(2 ** 31);
+    }
+  });
+
+  test("locks, tries and unlocks on the harness's namespace and the run's key", () => {
+    expect(runLockStatement("ffffffff")).toBe("SELECT pg_advisory_lock(1886676992, -1)");
+    expect(tryRunLockStatement("0000002a")).toBe(
+      "SELECT pg_try_advisory_lock(1886676992, 42) AS locked",
+    );
+    expect(runUnlockStatement("0000002a")).toBe("SELECT pg_advisory_unlock(1886676992, 42)");
+  });
+});
+
+test("dropDatabaseStatement drops one database, whatever sessions it has", () => {
+  expect(dropDatabaseStatement("prisma_test_0a1b2c3d")).toBe(
+    'DROP DATABASE IF EXISTS "prisma_test_0a1b2c3d" WITH (FORCE)',
+  );
+});
+
+describe("Sweep lines", () => {
+  const server = "postgresql://app:***@db:5432/postgres";
+
+  test("names the server and what was dropped", () => {
+    expect(sweptMessage(server, ["prisma_test_0a1b2c3d_1", "prisma_test_0a1b2c3d"])).toBe(
+      `@flefebvre/prisma-test-helper: dropped databases left on ${server} by a run that was ` +
+        "killed: prisma_test_0a1b2c3d_1, prisma_test_0a1b2c3d",
+    );
+  });
+
+  test("names each database it could not drop, and says the run goes on", () => {
+    expect(sweepFailedMessage(server, ["prisma_test_0a1b2c3d (permission denied)"])).toBe(
+      `@flefebvre/prisma-test-helper: could not drop databases left on ${server} by a run ` +
+        "that was killed: prisma_test_0a1b2c3d (permission denied) — this run goes on; " +
+        'drop them by hand with DROP DATABASE "<name>" WITH (FORCE)',
+    );
+  });
+
+  test("says what a lost admin connection exposes", () => {
+    expect(lostLockMessage(server, "Connection terminated unexpectedly")).toBe(
+      `@flefebvre/prisma-test-helper: lost the admin connection to ${server} ` +
+        "(Connection terminated unexpectedly) — this run no longer holds its lock, so a run " +
+        "starting on that server now may drop this run's databases",
+    );
+  });
 });
