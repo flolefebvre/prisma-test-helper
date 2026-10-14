@@ -210,12 +210,38 @@ No compose file, or no Postgres service in it → leave the call bare. It defaul
 `postgres:18-alpine`; pass `image` if production runs another major. Every option is in
 the [API reference](api.md#createglobalsetupoptions).
 
+**Feed reference data your project seeds outside its migrations.** Look for the project's
+seed: the script `migrations.seed` names in `prisma.config.ts`, and the function that
+script calls to insert reference data such as plans, roles or countries. Found one, and
+tests need those rows → pass a `seed` that builds its own client from the URL it
+receives, calls that function, and disconnects:
+
+```ts
+export default createGlobalSetup({
+  seed: async (databaseUrl) => {
+    const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+    try {
+      await seedReferenceData(db);
+    } finally {
+      await db.$disconnect();
+    }
+  },
+});
+```
+
+Call the reference-data function, not the whole seed script: every table the seed fills
+becomes a Baseline table that every test starts with, demo data included. Build this
+client here; do not import the client module from step 2, which reads `DATABASE_URL`
+before any worker has one. No seed, or reference data that only migrations insert → leave
+`seed` out. Details: [The `seed` option](api.md#the-seed-option).
+
 This file must be inside `tsconfig.json`'s `include`. It carries the module augmentation
 that types `inject("templateDatabaseUri")`; outside the TypeScript program, that call
 will not typecheck.
 
 **Done when:** the file exists, exports the setup as `default`, pins the image when a
-compose file names one, and is inside the TypeScript program.
+compose file names one, passes a `seed` when the project seeds reference data its tests
+need, and is inside the TypeScript program.
 
 ## 4. Per-worker setup
 

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-import { beforeEach, describe, expect, test, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from "vitest";
 import type { TestProject } from "vitest/node";
 
 import {
@@ -58,12 +58,13 @@ vi.mock("@testcontainers/postgresql", () => ({
 // A stand-in for pg's Client that records every connection it was opened with, every
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
-// first query containing a key resolve with those rows.
+// first query containing a key resolve with those rows (a function answers each such
+// query anew).
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
   const queries: string[] = [];
   const events: string[] = [];
-  const answers = new Map<string, unknown[]>();
+  const answers = new Map<string, unknown[] | (() => unknown[])>();
   // `failWith` makes closing a connection to `failFor` reject.
   const ended = {
     count: 0,
@@ -85,7 +86,9 @@ const pg = vi.hoisted(() => {
       if (failure.failOn !== undefined && sql.includes(failure.failOn)) {
         throw new Error(failure.message);
       }
-      for (const [key, rows] of answers) if (sql.includes(key)) return { rows };
+      for (const [key, rows] of answers) {
+        if (sql.includes(key)) return { rows: typeof rows === "function" ? rows() : rows };
+      }
       return { rows: [] };
     }
     async end() {
@@ -280,6 +283,130 @@ describe("createGlobalSetup", () => {
       );
       expect(clones()).toEqual([]);
       expect(postgres.started.stop).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("the seed", () => {
+    const TEMPLATE_URI = "postgresql://test:test@localhost:32768/prisma_test";
+    const SESSIONS_QUERY =
+      "SELECT count(*)::int AS count FROM pg_stat_activity " +
+      "WHERE datname = 'prisma_test' AND backend_type = 'client backend'";
+    const sessionChecks = () => pg.queries.filter((query) => query.includes("pg_stat_activity"));
+
+    beforeEach(() => {
+      pg.answers.set("pg_stat_activity", [{ count: 0 }]);
+      (execFileSync as Mock).mockImplementation(() => {
+        pg.events.push("migrate");
+      });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      (execFileSync as Mock).mockReset();
+    });
+
+    test("runs once, after migrate and before the install and the clones, on the template", async () => {
+      const seed = vi.fn(() => {
+        pg.events.push("seed");
+      });
+
+      await runSetup({ seed });
+
+      expect(seed).toHaveBeenCalledTimes(1);
+      expect(seed).toHaveBeenCalledWith(TEMPLATE_URI);
+      // The check's connection to `postgres`, then the install's to the template, then
+      // the clones'.
+      expect(pg.events).toEqual([
+        "migrate",
+        "seed",
+        "open postgres",
+        "close postgres",
+        "open prisma_test",
+        "close prisma_test",
+        "open postgres",
+        "close postgres",
+      ]);
+      expect(pg.queries[0]).toBe(SESSIONS_QUERY);
+      expect(pg.queries[1]).toBe(HARNESS_SCHEMA_STATEMENT);
+    });
+
+    test("awaits an async seed before going on", async () => {
+      await runSetup({
+        seed: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          pg.events.push("seed done");
+        },
+      });
+
+      expect(pg.events.slice(0, 3)).toEqual(["migrate", "seed done", "open postgres"]);
+    });
+
+    // Autovacuum workers and other background processes report the template's name in
+    // pg_stat_activity too, but `CREATE DATABASE … TEMPLATE` waits them out itself.
+    test("counts only client backends connected to the template", async () => {
+      await runSetup({ seed: () => {}, databaseName: "it's_test" });
+
+      expect(sessionChecks()).toEqual([
+        "SELECT count(*)::int AS count FROM pg_stat_activity " +
+          "WHERE datname = 'it''s_test' AND backend_type = 'client backend'",
+      ]);
+    });
+
+    test("fails naming the seed, with its error as cause, and stops the container", async () => {
+      const error = new Error("duplicate key value violates unique constraint");
+
+      await expect(
+        runSetup({
+          seed: async () => {
+            throw error;
+          },
+        }),
+      ).rejects.toMatchObject({
+        message: "the seed failed: duplicate key value violates unique constraint",
+        cause: error,
+      });
+      expect(pg.connections).toEqual([]);
+      expect(postgres.started.stop).toHaveBeenCalledTimes(1);
+    });
+
+    test("waits for a backend that exits a moment after its client disconnected", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      let checks = 0;
+      pg.answers.set("pg_stat_activity", () => [{ count: ++checks < 3 ? 1 : 0 }]);
+
+      const run = runSetup({ seed: () => {} });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await run;
+
+      expect(sessionChecks()).toHaveLength(3);
+      expect(clones()).toHaveLength(2);
+    });
+
+    test("fails actionably when the seed left a connection open, and clones nothing", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      pg.answers.set("pg_stat_activity", [{ count: 1 }]);
+
+      const run = runSetup({ seed: () => {} });
+      const failed = expect(run).rejects.toThrow(
+        "the seed left a connection open to the Template Database prisma_test " +
+          "(1 session(s) still connected after 2 s) — disconnect your client " +
+          "(e.g. await db.$disconnect()) before the seed returns",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await failed;
+
+      expect(sessionChecks()).toHaveLength(20);
+      expect(clones()).toEqual([]);
+      // Nothing is installed either: the check's connection is the only one opened.
+      expect(pg.events).toEqual(["migrate", "open postgres", "close postgres"]);
+      expect(postgres.started.stop).toHaveBeenCalledTimes(1);
+    });
+
+    test("without a seed, nothing is checked", async () => {
+      await runSetup();
+
+      expect(sessionChecks()).toEqual([]);
+      expect(pg.connections).toHaveLength(2);
     });
   });
 

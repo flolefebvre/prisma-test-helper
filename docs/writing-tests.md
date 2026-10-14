@@ -27,8 +27,9 @@ test("starts from a clean database: the author above is gone", async () => {
 The **Reset** is the cleanup. Before a file's first test and after every test, it empties
 every table and rewinds every sequence in one statement, so each test starts from an
 empty Worker Database with ids back at 1: no truncation of your own, no ordering
-constraints, no leftover rows. The one exception is rows your migrations inserted, which
-every test starts with: see [Rows your migrations insert](#rows-your-migrations-insert).
+constraints, no leftover rows. The one exception is rows your migrations and the seed
+inserted, which every test starts with: see
+[Rows your migrations insert](#rows-your-migrations-insert).
 
 ### Rows your migrations insert
 
@@ -49,6 +50,10 @@ it clones the Worker Databases. Every test starts with those rows:
   its rows itself. The next Reset restores them.
 - Only `_prisma_migrations`, extension-owned tables such as PostGIS's
   `spatial_ref_sys`, and the harness's own schema are left out entirely.
+
+**Rows your global-setup `seed` inserts are Baseline rows too.** Given a
+[`seed`](api.md#the-seed-option), global setup runs it after migrate and before the
+snapshot, so every table it fills is a Baseline table, under every rule above.
 
 The harness keeps the snapshot in a `prisma_test_helper` schema in every Worker
 Database, and tracks writes with a `prisma_test_helper_dirty` trigger on each ordinary
@@ -107,9 +112,19 @@ deferred constraint sees committed rows the way it would there.
 
 ## Fixtures and seeded fake data
 
-Reference data every test needs belongs in a migration: the
-[Baseline](#rows-your-migrations-insert) then puts it back for every test. Data a test
-builds for itself, through factories, is a different matter.
+Reference data every test needs comes from one of two places, and the
+[Baseline](#rows-your-migrations-insert) puts it back for every test either way:
+
+- **a migration** that inserts it;
+- **your project's own seed function**, passed to global setup as
+  [`seed`](api.md#the-seed-option): the function your real seed already calls to insert
+  plans, roles or countries. It runs once per run, before the Worker Databases are
+  cloned.
+
+Keep demo data out of that seed. A seed that also creates, say, an admin user makes that
+table a Baseline table: every test starts with the user, and every test that writes the
+table pays its restore, about the time it takes to copy its rows. Build such rows per test
+instead. Data a test builds for itself, through factories, is a different matter.
 
 Test-data factories live in your project, not in the harness. The **Reset Hook** is the
 seam for wiring them, and any other fixture library, into the per-test lifecycle:
@@ -133,7 +148,8 @@ export function createAuthor() {
 }
 ```
 
-Each hook receives `{ testName, seed }`. `seed` is a deterministic 32-bit hash (FNV-1a)
+Each hook receives `{ testName, seed }`; this `seed` is a number, not the global-setup
+option. It is a deterministic 32-bit hash (FNV-1a)
 of `testName` alone, never of the worker id, the file, or the run order. Rerunning one
 test with `-t` therefore hands it the same seed a full-suite run did, which is what makes
 seeded data reproducible in isolation.

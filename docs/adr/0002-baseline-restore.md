@@ -252,3 +252,21 @@ has a transaction open, and never fails a file.
 - Writes a statement trigger cannot see are not tracked: `COPY` fires it, but a
   replication-role session (`session_replication_role = replica` set by the test itself)
   silences it, as it silences the Reset's own writes.
+
+## Amendment 1 (#39), 2026-10-14 — the seed feeds the Baseline
+
+`createGlobalSetup` takes a `seed`, the consumer's own seed function, which global setup
+calls once with the Template Database's URL **between migrate and the snapshot**. The
+tables it fills are therefore Baseline tables, snapshotted, tracked and restored exactly
+like those a migration fills; nothing in the install or the Reset changes. Wherever this
+ADR defines the Baseline as the tables non-empty "after migrate", read "after migrate and
+the seed".
+
+The seed runs in the consumer's code and may leave a connection open to the template,
+which would make `CREATE DATABASE … TEMPLATE` fail with SQLSTATE 55006, naming cloning.
+So when a seed is configured, global setup checks `pg_stat_activity` for client backends
+on the template right after the seed returns, from an admin connection to `postgres`,
+polling for about two seconds (a disconnected client's backend exits a moment after its
+socket closes), and fails naming the seed. It never terminates a backend: a pool whose
+idle client is killed emits `error`, which can crash the main process. Without a seed,
+nothing else holds the template, and no check runs.

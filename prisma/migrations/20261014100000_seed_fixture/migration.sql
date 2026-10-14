@@ -1,0 +1,13 @@
+-- The table the global setup's `seed` fills (tests/global-setup.ts). Created empty: its
+-- rows come from the seed, not from a migration.
+
+-- CreateTable
+CREATE TABLE "Tag" (
+    "id" SERIAL NOT NULL,
+    "name" TEXT NOT NULL,
+
+    CONSTRAINT "Tag_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Tag_name_key" ON "Tag"("name");

@@ -21,8 +21,9 @@ A per-worker-slot clone of the Template Database, named `<template>_<pool id>`. 
 commit to it for real. The only kind of database the Reset may empty.
 
 **Baseline**:
-The rows `prisma migrate deploy` leaves in the Template Database: every table that is
-non-empty after migrate is a **Baseline table**. Inferred, never configured. Global setup
+The rows `prisma migrate deploy`, and the consumer's global-setup `seed` when there is
+one, leave in the Template Database: every table that is non-empty after migrate and the
+seed is a **Baseline table**. Inferred, never configured. Global setup
 snapshots those tables (and the positions of the sequences they own) into the harness's
 `prisma_test_helper` schema, and a statement trigger marks an ordinary Baseline table
 dirty when a test writes it. Every test starts from the Baseline. See
