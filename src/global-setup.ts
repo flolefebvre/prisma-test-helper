@@ -101,11 +101,15 @@ export interface CreateGlobalSetupOptions {
    * Connection URL of an existing Postgres server to run against instead of starting a
    * container. Any database on the server will do: the harness connects through it only
    * to create and drop the run's own databases, and never writes into it. The role must
-   * be a superuser, and the server Postgres 13 or later.
+   * be a superuser, the server Postgres 13 or later, and it must have a `postgres`
+   * database, where every run holds its lock whatever database the URL names.
    *
    * The run's Template Database is then `<databaseName>_<run id>` (8 hex characters), its
    * Worker Databases `<databaseName>_<run id>_1..N`, so several runs can share one
-   * server; teardown drops exactly those. The container's tuning does not apply: the
+   * server; teardown drops exactly those. Each is marked with the comment
+   * `prisma-test-helper run <run id>`, so that when a run is killed before its teardown,
+   * the next run on the server drops what it left at startup — only marked databases, and
+   * never those of a run still going. The container's tuning does not apply: the
    * server's own settings decide speed. Refused alongside `image` or `postgresSettings`.
    *
    * The `PRISMA_TEST_HELPER_URL` environment variable, when non-empty, overrides it. An
@@ -191,7 +195,7 @@ async function provision(
       await assertTemplateReleased(server.adminUrl, server.templateName);
     }
     await installBaseline(server.templateUrl, server.templateName);
-    await cloneWorkerDatabases(server.adminUrl, server.templateName, workerCount(project));
+    await cloneWorkerDatabases(server, workerCount(project));
   } catch (error) {
     await server.teardown().catch(() => {});
     throw error;
@@ -347,9 +351,11 @@ async function installBaseline(templateUrl: string, databaseName: string): Promi
 }
 
 /**
- * Clone the migrated template into the Worker Databases, over an admin connection to
- * `adminUrl` — the `postgres` database, never the template, which must have no
- * connections while it is cloned.
+ * Clone the migrated template into the Worker Databases, over an admin connection to the
+ * server's `adminUrl` — the `postgres` database, never the template, which must have no
+ * connections while it is cloned. When the server marks what the run creates (url mode),
+ * each clone is marked right after it is created, on the same connection, so a run
+ * killed between the two leaves at most one unmarked database behind.
  *
  * It goes through `pg` from this process, not a client inside the container, because
  * that is the harness's one SQL path: it can return rows, which the Baseline snapshot
@@ -358,15 +364,14 @@ async function installBaseline(templateUrl: string, databaseName: string): Promi
  * transaction of a multi-statement string — and the first failure stops the run,
  * naming the Worker Database that failed.
  */
-async function cloneWorkerDatabases(
-  adminUrl: string,
-  databaseName: string,
-  count: number,
-): Promise<void> {
-  await withAdminConnection(adminUrl, async (connection) => {
+async function cloneWorkerDatabases(server: ServerHandle, count: number): Promise<void> {
+  const databaseName = server.templateName;
+  await withAdminConnection(server.adminUrl, async (connection) => {
     for (const { workerDatabase, statement } of cloneStatements(databaseName, count)) {
       try {
         await connection.query(statement);
+        const mark = server.markStatement?.(workerDatabase);
+        if (mark !== undefined) await connection.query(mark);
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         throw new Error(

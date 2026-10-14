@@ -33,6 +33,18 @@ _Avoid_: external mode, shared mode
 other runs may share: the Template Database `<databaseName>_<run id>` and its Worker
 Databases `<databaseName>_<run id>_<pool id>`. A container run has none.
 
+**Run marker**:
+The comment `prisma-test-helper run <run id>` a url-mode run puts on every database it
+creates, right after creating it. It is what makes a database the harness's to clean up:
+a database without one is never dropped, whatever its name. While it lives, the run also
+holds an advisory lock keyed by its run id, in the server's `postgres` database.
+
+**Sweep**:
+What a url-mode run does at startup, before creating anything: list the databases that
+carry a Run marker, and drop those of every run whose lock it can take (that run's
+session is gone, so it was killed), leaving those of a run still going.
+_Avoid_: cleanup (the Reset is not one either), garbage collection
+
 **Baseline**:
 The rows `prisma migrate deploy`, and the consumer's global-setup `seed` when there is
 one, leave in the Template Database: every table that is non-empty after migrate and the

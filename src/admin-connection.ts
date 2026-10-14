@@ -17,6 +17,42 @@ export interface AdminConnection {
   query<Row extends Record<string, unknown> = Record<string, unknown>>(sql: string): Promise<Row[]>;
 }
 
+/** An admin connection the caller holds, and closes when it is done with it. */
+export interface HeldAdminConnection {
+  connection: AdminConnection;
+  close(): Promise<void>;
+}
+
+/**
+ * Open an admin connection to `url` that lives until the caller closes it — for a session
+ * that must outlast any one piece of work, such as one holding an advisory lock.
+ *
+ * `onError` receives what `pg` emits when the connection drops while idle: unhandled,
+ * that `error` event would crash the process. A query in flight rejects with the same
+ * error on its own. Without `onError` the event is ignored. A failed connect rejects with
+ * `pg`'s own error.
+ */
+export async function openAdminConnection(
+  url: string,
+  onError: (error: Error) => void = () => {},
+): Promise<HeldAdminConnection> {
+  const { default: pg } = await import("pg");
+  // `ssl: false` is the default only: an `sslmode` in the URL still overrides it. Without
+  // it pg would fall back to the host's PGSSLMODE — which the old in-container path never
+  // saw — and fail against a plaintext server where the URL asked for nothing.
+  const client: Client = new pg.Client({ connectionString: url, ssl: false });
+  client.on("error", onError);
+  await client.connect();
+  return {
+    connection: {
+      async query<Row extends Record<string, unknown>>(sql: string): Promise<Row[]> {
+        return (await client.query<Row>(sql)).rows;
+      },
+    },
+    close: () => client.end(),
+  };
+}
+
 /**
  * Open an admin connection to `url`, hand it to `use`, and close it once `use` settles —
  * on success and on failure alike, so no admin connection outlives the work it was opened
@@ -34,7 +70,7 @@ export async function withAdminConnection<T>(
   url: string,
   use: (connection: AdminConnection) => Promise<T>,
 ): Promise<T> {
-  const { connection, close } = await open(url);
+  const { connection, close } = await openAdminConnection(url);
   let result: T;
   try {
     result = await use(connection);
@@ -46,24 +82,4 @@ export async function withAdminConnection<T>(
   }
   await close();
   return result;
-}
-
-/** Connect to `url`; the caller owns closing it. */
-async function open(
-  url: string,
-): Promise<{ connection: AdminConnection; close: () => Promise<void> }> {
-  const { default: pg } = await import("pg");
-  // `ssl: false` is the default only: an `sslmode` in the URL still overrides it. Without
-  // it pg would fall back to the host's PGSSLMODE — which the old in-container path never
-  // saw — and fail against a plaintext server where the URL asked for nothing.
-  const client: Client = new pg.Client({ connectionString: url, ssl: false });
-  await client.connect();
-  return {
-    connection: {
-      async query<Row extends Record<string, unknown>>(sql: string): Promise<Row[]> {
-        return (await client.query<Row>(sql)).rows;
-      },
-    },
-    close: () => client.end(),
-  };
 }

@@ -266,6 +266,9 @@ Requirements, checked when the run starts, before any database is created:
   naming the role.
 - **Postgres 13 or later.** Teardown drops the run's databases with
   `DROP DATABASE … WITH (FORCE)`, which Postgres 13 introduced.
+- **A `postgres` database.** Every run holds a lock in the server's `postgres` database for
+  as long as it lives, whatever database the URL names, and cleans up after killed runs
+  from there (see below). Postgres ships that database by default, managed services too.
 - **Reachable from the test process.** The global setup and every worker connect to it
   directly, from the machine running Vitest.
 
@@ -275,8 +278,37 @@ settings decide how fast migrate, the clones and every test write run, and a dur
 server is slower than the throwaway container.
 
 Each run creates `<databaseName>_<run id>` and its Worker Databases, and drops them when it
-ends, so runs sharing a server never collide. A run that is killed before its teardown
-leaves its databases behind; drop them by hand.
+ends, so runs sharing a server never collide.
+
+**Killed runs.** A run that is killed before its teardown (Ctrl-C twice, out of memory, a
+cancelled CI job) leaves its databases on the server. The next run on that server drops
+them when it starts:
+
+- **What is marked.** Every database a run creates, its template and each Worker Database,
+  carries the comment `prisma-test-helper run <run id>` (`COMMENT ON DATABASE`). Only
+  databases with that comment are ever cleaned up. A database without it is never
+  touched, even one named like a harness database.
+- **How a dead run is told from a live one.** While it runs, each run holds a Postgres
+  advisory lock keyed by its run id, on a connection to the server's `postgres` database.
+  Postgres releases that lock as soon as the run's connection ends, however the run
+  ended. At startup, before creating anything, a run lists the marked databases and tries
+  the lock of each run that marked them. If it gets the lock, that run is dead, and its
+  databases are dropped with `DROP DATABASE … WITH (FORCE)`. If not, that run is still
+  going, and its databases are left alone, so concurrent runs are safe.
+- **What it prints.** One line on stderr names the databases it dropped:
+  `dropped databases left on <url> by a run that was killed: …`. A database it cannot
+  drop does not fail the run; a second line names it, for you to drop by hand.
+
+To list what killed runs left on a server by hand:
+
+```sql
+SELECT datname, shobj_description(oid, 'pg_database')
+FROM pg_database
+WHERE shobj_description(oid, 'pg_database') LIKE 'prisma-test-helper run %';
+```
+
+Drop a database it lists only once no run with that id is going any more:
+`DROP DATABASE "<name>" WITH (FORCE)`.
 
 ## 4. Per-worker setup
 

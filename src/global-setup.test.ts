@@ -12,6 +12,19 @@ import {
 } from "./baseline.js";
 import { createGlobalSetup } from "./global-setup.js";
 import { postgresCommand } from "./postgres-command.js";
+import {
+  lostLockMessage,
+  MARKED_DATABASES_QUERY,
+  markStatement,
+  runLockKey,
+  runLockStatement,
+  runMarker,
+  runUnlockStatement,
+  SERVER_CHECK_QUERY,
+  sweepFailedMessage,
+  sweptMessage,
+  tryRunLockStatement,
+} from "./server.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -62,27 +75,44 @@ vi.mock("@testcontainers/postgresql", () => ({
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
 // first query containing a key resolve with those rows (a function answers each such
-// query anew). `connect` makes every connect reject with that message.
+// query anew). `connect` makes every connect reject with that message, with `connectCode`
+// as its SQLSTATE — or only connects to the database `connectTo`, when set.
+// `errorListeners` holds each client's `error` listener, so a test can drop a connection
+// the way pg does.
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
+  const errorListeners: ((error: Error) => void)[] = [];
   const queries: string[] = [];
   const events: string[] = [];
-  const answers = new Map<string, unknown[] | (() => unknown[])>();
+  const answers = new Map<string, unknown[] | ((sql: string) => unknown[])>();
   // `failWith` makes closing a connection to `failFor` reject.
   const ended = {
     count: 0,
     failWith: undefined as string | undefined,
     failFor: undefined as string | undefined,
   };
-  const failure: { failOn?: string; message?: string; connect?: string } = {};
+  const failure: {
+    failOn?: string;
+    message?: string;
+    connect?: string;
+    connectCode?: string;
+    connectTo?: string;
+  } = {};
   class Client {
     readonly database: string;
     constructor(config: { connectionString: string; ssl?: unknown }) {
       connections.push(config);
       this.database = new URL(config.connectionString).pathname.slice(1);
     }
+    on(event: string, listener: (error: Error) => void) {
+      if (event === "error") errorListeners.push(listener);
+      return this;
+    }
     async connect() {
-      if (failure.connect !== undefined) throw new Error(failure.connect);
+      const targeted = failure.connectTo === undefined || failure.connectTo === this.database;
+      if (failure.connect !== undefined && targeted) {
+        throw Object.assign(new Error(failure.connect), { code: failure.connectCode });
+      }
       events.push(`open ${this.database}`);
     }
     async query(sql: string) {
@@ -91,7 +121,7 @@ const pg = vi.hoisted(() => {
         throw new Error(failure.message);
       }
       for (const [key, rows] of answers) {
-        if (sql.includes(key)) return { rows: typeof rows === "function" ? rows() : rows };
+        if (sql.includes(key)) return { rows: typeof rows === "function" ? rows(sql) : rows };
       }
       return { rows: [] };
     }
@@ -103,7 +133,7 @@ const pg = vi.hoisted(() => {
       }
     }
   }
-  return { Client, connections, queries, events, answers, ended, failure };
+  return { Client, connections, errorListeners, queries, events, answers, ended, failure };
 });
 vi.mock("pg", () => ({ default: { Client: pg.Client } }));
 
@@ -112,6 +142,7 @@ beforeEach(() => {
   postgres.databases.length = 0;
   postgres.commands.length = 0;
   pg.connections.length = 0;
+  pg.errorListeners.length = 0;
   pg.queries.length = 0;
   pg.events.length = 0;
   pg.answers.clear();
@@ -121,6 +152,8 @@ beforeEach(() => {
   delete pg.failure.failOn;
   delete pg.failure.message;
   delete pg.failure.connect;
+  delete pg.failure.connectCode;
+  delete pg.failure.connectTo;
   vi.stubEnv("PRISMA_TEST_HELPER_URL", "");
 });
 
@@ -247,6 +280,17 @@ describe("createGlobalSetup", () => {
     await runSetup();
 
     expect(pg.ended.count).toBe(2);
+  });
+
+  // A container dies with its run: nothing on it can outlive the run, so nothing is
+  // marked, locked or swept.
+  test("marks nothing, takes no lock and sweeps nothing", async () => {
+    const { teardown } = await runSetup();
+    await teardown();
+
+    expect(pg.queries.filter((query) => /COMMENT|advisory|shobj_description/.test(query))).toEqual(
+      [],
+    );
   });
 
   describe("the Baseline install", () => {
@@ -611,7 +655,9 @@ describe("createGlobalSetup in url mode", () => {
   test("does its admin work over the URL as given, and installs over the template", async () => {
     const { project } = await runSetup({ url: SERVER });
 
+    // The held connection, the template's creation, the install, the clones.
     expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
+      SERVER,
       SERVER,
       `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
       SERVER,
@@ -630,7 +676,9 @@ describe("createGlobalSetup in url mode", () => {
 
     await runSetup({ url: SERVER });
 
-    expect(pg.connections[0]!.connectionString).toBe("postgresql://dev:pw@localhost:5433/app");
+    // The held connection goes to the server's postgres database; the clones, to the URL.
+    expect(pg.connections[0]!.connectionString).toBe("postgresql://dev:pw@localhost:5433/postgres");
+    expect(pg.connections.at(-1)!.connectionString).toBe("postgresql://dev:pw@localhost:5433/app");
   });
 
   test("runs in url mode from PRISMA_TEST_HELPER_URL alone", async () => {
@@ -746,5 +794,260 @@ describe("createGlobalSetup in url mode", () => {
         'drop them by hand with DROP DATABASE "<name>" WITH (FORCE)',
     );
     expect(drops()).toHaveLength(3);
+  });
+
+  describe("Run markers, the run lock and the Sweep", () => {
+    /** The run id of the run, read back from its template's name. */
+    const runIdOf = (project: TestProject) => providedTemplate(project).slice(-8);
+
+    const DEAD = "0a1b2c3d";
+    const LIVE = "ffffffff";
+    // What the listing returns: a dead run's two databases, a live run's template, and a
+    // database whose comment only starts like a marker.
+    const leftovers = () =>
+      pg.answers.set("shobj_description", [
+        { datname: `prisma_test_${DEAD}`, marker: runMarker(DEAD) },
+        { datname: `prisma_test_${DEAD}_1`, marker: runMarker(DEAD) },
+        { datname: `app_test_${LIVE}`, marker: runMarker(LIVE) },
+        { datname: "prisma_test_0b1b2c3d", marker: `${runMarker("0b1b2c3d")} (kept)` },
+      ]);
+    /** Nothing was created or dropped, and the held connection was the only one, closed. */
+    const expectNothingCreated = () => {
+      expect(created()).toEqual([]);
+      expect(drops()).toEqual([]);
+      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+    };
+    // Only the dead run's lock is free.
+    const deadRunUnlocked = () =>
+      pg.answers.set("pg_try_advisory_lock", (sql) => [
+        { locked: sql.includes(`, ${runLockKey(DEAD)})`) },
+      ]);
+
+    // Advisory locks are per database: runs whose URLs name different databases must
+    // still lock, and sweep, in the same one.
+    test("holds its lock and sweeps on the postgres database, whatever the URL names", async () => {
+      const app = "postgresql://app:s3cret@db.internal:5432/app";
+
+      const { teardown, project } = await runSetup({ url: app });
+      await teardown();
+
+      expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
+        SERVER,
+        app,
+        `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
+        app,
+        app,
+      ]);
+      expect(pg.queries.slice(0, 2)).toEqual([
+        SERVER_CHECK_QUERY,
+        runLockStatement(runIdOf(project)),
+      ]);
+    });
+
+    // The held connection reaches `postgres` even when the URL's own database is a typo:
+    // the run must still fail as unable to connect to that URL, before creating anything.
+    test("fails naming the URL before creating anything when only its database is unreachable", async () => {
+      const app = "postgresql://app:s3cret@db.internal:5432/apps";
+      pg.failure.connect = 'database "apps" does not exist';
+      pg.failure.connectCode = "3D000";
+      pg.failure.connectTo = "apps";
+
+      const error = (await runSetup({ url: app }).catch((thrown: unknown) => thrown)) as Error;
+
+      expect(error.message).toBe(
+        "could not connect to the Postgres server given by `url` " +
+          '(postgresql://app:***@db.internal:5432/apps): database "apps" does not exist — ' +
+          "check that the server is reachable from the test process and the URL's " +
+          "credentials are right",
+      );
+      expectNothingCreated();
+    });
+
+    test("fails before creating anything when the server has no postgres database", async () => {
+      pg.failure.connect = 'database "postgres" does not exist';
+      pg.failure.connectCode = "3D000";
+
+      const error = (await runSetup({ url: SERVER }).catch((thrown: unknown) => thrown)) as Error;
+
+      expect(error.message).toBe(
+        `the Postgres server ${REDACTED} has no "postgres" database — url mode needs one: ` +
+          "each run holds its lock there, and sweeps the databases killed runs left from " +
+          "there, so that runs whose URLs name different databases still see each other. " +
+          "Create it (CREATE DATABASE postgres), or remove url to run in a container.",
+      );
+      expect(error.cause).toMatchObject({ code: "3D000" });
+      expect(pg.queries).toEqual([]);
+    });
+
+    test("checks the server, takes its own lock, sweeps, then creates and marks the template", async () => {
+      const { project } = await runSetup({ url: SERVER });
+      const template = providedTemplate(project);
+
+      expect(pg.queries.slice(0, 5)).toEqual([
+        SERVER_CHECK_QUERY,
+        runLockStatement(runIdOf(project)),
+        MARKED_DATABASES_QUERY,
+        `CREATE DATABASE "${template}"`,
+        markStatement(template, runIdOf(project)),
+      ]);
+    });
+
+    test("marks every Worker Database right after cloning it", async () => {
+      const { project } = await runSetup({ url: SERVER });
+      const template = providedTemplate(project);
+      const runId = runIdOf(project);
+
+      expect(
+        pg.queries.filter((query) => /^(CREATE DATABASE|COMMENT)/.test(query)).slice(2),
+      ).toEqual([
+        `CREATE DATABASE "${template}_1" TEMPLATE "${template}"`,
+        markStatement(`${template}_1`, runId),
+        `CREATE DATABASE "${template}_2" TEMPLATE "${template}"`,
+        markStatement(`${template}_2`, runId),
+      ]);
+    });
+
+    test("names the Worker Database when marking it fails, and drops what the run derived", async () => {
+      pg.failure.failOn = '_1" IS';
+      pg.failure.message = "must be owner of database";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        /failed at prisma_test_[0-9a-f]{8}_1: must be owner of database/,
+      );
+      expect(drops()).toHaveLength(3);
+    });
+
+    test("drops a dead run's marked databases under its lock, and leaves a live run's alone", async () => {
+      leftovers();
+      deadRunUnlocked();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { project } = await runSetup({ url: SERVER });
+
+      const sweep = pg.queries.slice(
+        pg.queries.indexOf(MARKED_DATABASES_QUERY) + 1,
+        pg.queries.indexOf(`CREATE DATABASE "${providedTemplate(project)}"`),
+      );
+      expect(sweep).toEqual([
+        tryRunLockStatement(DEAD),
+        `DROP DATABASE IF EXISTS "prisma_test_${DEAD}" WITH (FORCE)`,
+        `DROP DATABASE IF EXISTS "prisma_test_${DEAD}_1" WITH (FORCE)`,
+        runUnlockStatement(DEAD),
+        tryRunLockStatement(LIVE),
+      ]);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        sweptMessage(REDACTED, [`prisma_test_${DEAD}`, `prisma_test_${DEAD}_1`]),
+      );
+    });
+
+    test("sweeps silently when no run left anything", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await runSetup({ url: SERVER });
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    test("warns about a leftover it could not drop, and goes on with the run", async () => {
+      leftovers();
+      deadRunUnlocked();
+      pg.failure.failOn = `"prisma_test_${DEAD}_1" WITH`;
+      pg.failure.message = "permission denied";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { project } = await runSetup({ url: SERVER });
+
+      expect(providedTemplate(project)).toMatch(TEMPLATE);
+      expect(pg.queries).toContain(runUnlockStatement(DEAD));
+      expect(warn).toHaveBeenCalledWith(sweptMessage(REDACTED, [`prisma_test_${DEAD}`]));
+      expect(warn).toHaveBeenCalledWith(
+        sweepFailedMessage(REDACTED, [`prisma_test_${DEAD}_1 (permission denied)`]),
+      );
+    });
+
+    test("fails when the listing fails, creating nothing and closing its connection", async () => {
+      pg.failure.failOn = "shobj_description";
+      pg.failure.message = "canceling statement due to statement timeout";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        "canceling statement due to statement timeout",
+      );
+      expectNothingCreated();
+    });
+
+    test("closes its held connection when the server check refuses it", async () => {
+      check({ superuser: false });
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(/is not a superuser/);
+      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+    });
+
+    test("drops the template and closes its held connection when marking the template fails", async () => {
+      pg.failure.failOn = "COMMENT ON";
+      pg.failure.message = "must be owner of database";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        /^could not create the Template Database prisma_test_[0-9a-f]{8} on .*: must be owner/,
+      );
+      expect(drops()).toHaveLength(3);
+      // Held; the creation over the URL, closed; the teardown's drops, closed; then held.
+      expect(pg.events).toEqual([
+        "open postgres",
+        "open postgres",
+        "close postgres",
+        "open postgres",
+        "close postgres",
+        "close postgres",
+      ]);
+    });
+
+    // The lock must stay held until the run's databases are gone, or a run starting
+    // in between could take this one for dead.
+    test("teardown releases the lock only after the drops: the held connection closes last", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      pg.events.length = 0;
+      pg.answers.set("DROP DATABASE", () => {
+        pg.events.push("drop");
+        return [];
+      });
+
+      await teardown();
+
+      expect(pg.events).toEqual([
+        "open postgres",
+        "drop",
+        "drop",
+        "drop",
+        "close postgres",
+        "close postgres",
+      ]);
+      expect(pg.errorListeners).toHaveLength(5);
+    });
+
+    test("teardown closes the held connection even when a drop fails", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      pg.events.length = 0;
+      pg.failure.failOn = "DROP DATABASE";
+      pg.failure.message = "permission denied";
+
+      await expect(teardown()).rejects.toThrow(/could not drop this run's databases/);
+      expect(pg.events.filter((event) => event.startsWith("close"))).toHaveLength(2);
+    });
+
+    test("warns once when the held connection drops, and teardown does not close it again", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const held = pg.errorListeners[0]!;
+
+      held(new Error("Connection terminated unexpectedly"));
+      held(new Error("Connection terminated unexpectedly"));
+      pg.events.length = 0;
+      await teardown();
+
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        lostLockMessage(REDACTED, "Connection terminated unexpectedly"),
+      );
+      expect(pg.events.filter((event) => event.startsWith("close"))).toHaveLength(1);
+    });
   });
 });
