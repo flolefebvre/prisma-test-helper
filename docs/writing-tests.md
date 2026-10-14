@@ -76,6 +76,9 @@ touches the database**, outside any `test` or `describe` block, with your app's 
   that never touch the database are free to skip the call.
 - **A second call in the same file throws** `setupDatabase() was called twice in this file`.
   Keep the one at the top.
+- **The opt-in is per file, under `isolate: false` too.** `isDatabaseSetUp()` reads
+  `false` in a file that never called `setupDatabase(db)`, even when an earlier file on
+  the same worker did.
 
 ## Where test data belongs
 
@@ -160,7 +163,10 @@ seedable works the same way, and a hook that resets a plain counter is just as v
 use of the seam.
 
 Hooks are held in a `Set`, so registering the same function twice runs it once. They run
-sequentially, in registration order, and are awaited.
+sequentially, in registration order, and are awaited. They are never unregistered: under
+[`isolate: false`](setup.md#isolate-false) a hook registered at a fixture module's import
+serves every file on the worker, and one registered inside a test file's body keeps
+running for every later file on that worker. Register hooks in fixture modules.
 
 A helper that relies on the per-test Reset should fail loudly when the calling file
 forgot to opt in, rather than write rows that no Reset clears between that file's tests:
@@ -177,10 +183,12 @@ if (!isDatabaseSetUp()) {
 
 Two wiring rules hold for as long as the harness is installed:
 
-- **Keep `pool: "forks"` and `isolate: true`.** Together they re-run `setupFiles` in a
-  fresh process per test file. Under `isolate: false`, module state leaks across files
-  and the `setupDatabase(db)` opt-in guard misreports a neighbouring file's opt-in.
-  Widening either breaks isolation silently. See [Vitest config](setup.md#5-vitest-config).
+- **Keep `pool: "forks"`, and `isolate` as the project set it.** `isolate: true`, the
+  default, gives every test file fresh modules. `isolate: false` is a supported opt-in
+  that runs faster: each file still starts from a clean Worker Database with its own
+  opt-in, but your module state, `vi.mock` calls and Reset Hooks registered in a test
+  file carry over to later files on that worker, and schema changes outside the
+  migrations are not seen. See [`isolate: false`](setup.md#isolate-false).
 - **Keep the setup file free of static app imports.** A static app import there builds
   your client before `setupWorkerDatabase()` assigns `DATABASE_URL`, and
   `setupDatabase(db)` then refuses every file. Reach app modules from the setup file with

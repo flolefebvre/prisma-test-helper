@@ -61,7 +61,9 @@ through the consumer's own Prisma client, that empties every table that is not a
 table, restores each Baseline table a test wrote to (and every partitioned one) from its
 snapshot, and rewinds every owned sequence, to its start value or, for a Baseline
 table's, to its snapshot position, in one statement. Runs once before a file's first
-test and after every test. Built once per file from a catalog discovery query.
+test and after every test. Built from a catalog discovery query once per worker: under
+Vitest's default `isolate: true`, where every file starts with fresh modules, that is once
+per file.
 _Avoid_: truncation, cleanup, wipe
 
 **Reset Hook**:

@@ -56,6 +56,10 @@ const resetHooks = new Set<ResetHook>();
  * registering the same function twice runs it once. The library itself never depends on
  * faker — it only hands you the seed.
  *
+ * Hooks are never unregistered. Under Vitest's `isolate: false` a worker keeps this
+ * module across test files, so a hook registered at a factory module's import runs for
+ * every file on the worker — and so does one registered inside a test file's body.
+ *
  * @example
  * registerResetHook(({ seed }) => {
  *   faker.seed(seed);

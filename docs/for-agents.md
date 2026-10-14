@@ -52,8 +52,12 @@ signatures: [API](api.md).
 4. **Finish what a test opens before it ends.** Await every query and end every
    transaction a second client opened; the Reset waits at most 5 seconds for a lock,
    then fails the test.
-5. **Leave `pool: "forks"` and `isolate: true` alone.** Together they re-run `setupFiles`
-   in a fresh process per test file; widening either breaks isolation silently.
+5. **Leave `pool: "forks"` and the project's `isolate` setting alone.** `isolate: true`,
+   the default, gives every test file fresh modules. `isolate: false` is a supported
+   opt-in: keep it where the project chose it, and do not switch modes on your own. Under
+   it, module state, `vi.mock` calls and Reset Hooks registered in a test file carry over
+   to later files on the worker, and DDL outside the migrations breaks later files'
+   Resets: see [`isolate: false`](setup.md#isolate-false).
 6. **Keep the setup file free of static app imports.** It calls `setupWorkerDatabase()`
    first; the app's client must be built from `DATABASE_URL` after that call. Reach app
    modules from it with a dynamic `import()` only; library imports are safe.
@@ -94,8 +98,8 @@ for files that already exist.
    after: see [TLS](setup.md#tls). See [Per-worker setup](setup.md#4-per-worker-setup).
 7. **Merge the Vitest config**: the four settings, on the database project when there are
    `projects`, plus alias resolution and the `server-only` alias when the project needs
-   them. If it set `pool: "threads"` or `isolate: false`, correct it and tell the user
-   why. See [Vitest config](setup.md#5-vitest-config).
+   them. If it set `pool: "threads"`, correct it and tell the user why; an existing
+   `isolate: false` stays. See [Vitest config](setup.md#5-vitest-config).
 8. **Prove it works** with the two-test smoke test against a real model, and run the
    suite twice; both runs must pass with the second test genuinely running. On failure,
    match the error in [Troubleshooting](troubleshooting.md). See
@@ -117,5 +121,5 @@ for files that already exist.
 | Write or edit a test that touches the DB              | [Writing tests](writing-tests.md)                                                              | The file calls `setupDatabase(db)` once at the top; no cleanup code; per-test data built in the test, `beforeEach` or a factory; it passes twice |
 | Write a fixture or test-data helper                   | [Fixtures and seeded fake data](writing-tests.md#fixtures-and-seeded-fake-data), [API](api.md) | Seeded from the Reset Hook's `seed`; the helper fails loudly via `isDatabaseSetUp()` when the file did not opt in                                |
 | Fix an error from the harness                         | [Troubleshooting](troubleshooting.md)                                                          | The error's own row is resolved at the step it points to, and the suite passes                                                                   |
-| Change the wiring (image, `url`, `projects`, aliases) | [Setup](setup.md), [API](api.md#createglobalsetupoptions)                                      | The smoke test, or the existing suite, still passes twice; `pool: "forks"` and `isolate: true` are untouched                                     |
+| Change the wiring (image, `url`, `projects`, aliases) | [Setup](setup.md), [API](api.md#createglobalsetupoptions)                                      | The smoke test, or the existing suite, still passes twice; `pool: "forks"` and the `isolate` setting are untouched                               |
 | Upgrade across a major version                        | [Migrating](migrating.md)                                                                      | Every step in the section for the jump is applied, no import of a removed export remains, and the suite passes twice                             |

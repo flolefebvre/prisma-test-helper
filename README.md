@@ -158,10 +158,19 @@ test("persists an author", async () => {
 });
 ```
 
+`isolate: true` is Vitest's default and the one these docs prescribe: every test file
+gets fresh modules. `isolate: false` is a supported opt-in. Each worker then keeps your
+app's modules and Prisma client across files, while every file still gets its own opt-in
+and a clean Worker Database. On a generated 73-table suite with a 300 ms app import, it
+cut the run by 46 % at 4 workers and 35 % at 16. The trade-offs: module state and
+`vi.mock` calls leak between files on a worker, Reset Hooks registered in a test file
+carry over, and schema changes outside migrations go unseen. See
+[`isolate: false`](docs/setup.md#isolate-false).
+
 ## Documentation
 
-- [Setup](docs/setup.md): the five files, merging into existing configs, `projects`,
-  path aliases, `server-only`, and a smoke test.
+- [Setup](docs/setup.md): the five files, merging into existing configs,
+  `isolate: false`, `projects`, path aliases, `server-only`, and a smoke test.
 - [Writing tests](docs/writing-tests.md): the `setupDatabase(db)` opt-in, where test
   data belongs, hooks and the Reset, locks, and Reset Hooks for fixtures.
 - [API](docs/api.md): every export, its options, and its entry point.
