@@ -14,6 +14,7 @@ import {
   BASELINE_CANDIDATES_QUERY,
   HARNESS_SCHEMA,
   HARNESS_SCHEMA_STATEMENT,
+  literal,
   nonEmptyTablesQuery,
   planBaseline,
   snapshotStatement,
@@ -48,6 +49,25 @@ export interface CreateGlobalSetupOptions {
    * @default "prisma_test"
    */
   databaseName?: string;
+  /**
+   * Your project's own seed, run once per run against the Template Database: after
+   * `prisma migrate deploy`, before the Baseline snapshot and before any Worker Database
+   * is cloned. It receives the Template Database's connection URI and builds its own
+   * client from it. Every table it fills becomes a Baseline table, so its rows are there
+   * at the start of every test.
+   *
+   * It must close every connection it opens before it returns (`await db.$disconnect()`):
+   * the template cannot be cloned while anything is connected to it. Its output is not
+   * captured.
+   *
+   * @example
+   * seed: async (databaseUrl) => {
+   *   const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+   *   await seedReferenceData(db);
+   *   await db.$disconnect();
+   * }
+   */
+  seed?: (databaseUrl: string) => void | Promise<void>;
 }
 
 // initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
@@ -68,16 +88,17 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
  * fork finds its database already provisioned.
  *
- * Between migrate and the clones, it installs the harness schema in the template and
- * snapshots its Baseline — the rows the migrations inserted — over a connection to the
- * template that is closed before cloning starts. The clones run here, over one admin connection to the `postgres` database that is
+ * After migrate it runs the consumer's `seed`, when one is given, and checks that the
+ * seed left no connection open to the template. Then it installs the harness schema in
+ * the template and snapshots its Baseline — the rows the migrations and the seed
+ * inserted — over a connection to the template that is closed before cloning starts. The clones run here, over one admin connection to the `postgres` database that is
  * closed before this returns, while nothing is connected to the template.
  * `CREATE DATABASE … TEMPLATE` fails when the template has other connections
  * (SQLSTATE 55006), which is why cloning from inside workers would need a lock;
  * cloning before workers exist needs none.
  */
 export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
-  const { image = "postgres:18-alpine", databaseName = "prisma_test" } = options;
+  const { image = "postgres:18-alpine", databaseName = "prisma_test", seed } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
     await assertDockerReachable();
@@ -99,6 +120,13 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
 
     try {
       migrate(container.getConnectionUri());
+      if (seed !== undefined) {
+        await runSeed(seed, container.getConnectionUri());
+        await assertTemplateReleased(
+          databaseUrl(container.getConnectionUri(), "postgres"),
+          databaseName,
+        );
+      }
       await installBaseline(container.getConnectionUri(), databaseName);
       await cloneWorkerDatabases(
         databaseUrl(container.getConnectionUri(), "postgres"),
@@ -186,6 +214,62 @@ function resolvePrismaBin(): string {
         "project's own Prisma — install the `prisma` package (it is a peer " +
         "dependency) and run the tests again.",
       { cause },
+    );
+  }
+}
+
+/**
+ * Run the consumer's seed against the Template Database. Its output is not captured: it
+ * is the consumer's own code. A throw or a rejection fails the run, naming the seed.
+ */
+async function runSeed(
+  seed: (databaseUrl: string) => void | Promise<void>,
+  templateUrl: string,
+): Promise<void> {
+  try {
+    await seed(templateUrl);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(`the seed failed: ${message}`, { cause });
+  }
+}
+
+/** How many times, and how far apart, the template is checked for the seed's sessions. */
+const RELEASE_ATTEMPTS = 20;
+const RELEASE_INTERVAL_MS = 100;
+
+/**
+ * Fail, naming the seed, when the seed left a connection open to the template.
+ *
+ * Anything connected to the template makes `CREATE DATABASE … TEMPLATE` fail with
+ * SQLSTATE 55006, an error that names cloning rather than the seed that caused it. The
+ * install is unaffected — it connects to the template itself — so this runs right after
+ * the seed, from an admin connection to `adminUrl` (the `postgres` database, so this
+ * session is not counted). Only client backends count: autovacuum and other background
+ * processes on the template report its name too, but `CREATE DATABASE` waits them out.
+ *
+ * A client that disconnected has closed its socket, but its backend exits a moment
+ * later, so the check polls, every {@link RELEASE_INTERVAL_MS} ms for about two seconds,
+ * before it fails. It never terminates a backend: a pool whose idle client is killed
+ * emits `error`, which can crash this process.
+ */
+async function assertTemplateReleased(adminUrl: string, databaseName: string): Promise<void> {
+  const query =
+    "SELECT count(*)::int AS count FROM pg_stat_activity " +
+    `WHERE datname = ${literal(databaseName)} AND backend_type = 'client backend'`;
+  const sessions = await withAdminConnection(adminUrl, async (connection) => {
+    for (let attempt = 1; ; attempt++) {
+      const [row] = await connection.query<{ count: number }>(query);
+      const count = row?.count ?? 0;
+      if (count === 0 || attempt === RELEASE_ATTEMPTS) return count;
+      await new Promise((resolve) => setTimeout(resolve, RELEASE_INTERVAL_MS));
+    }
+  });
+  if (sessions > 0) {
+    throw new Error(
+      `the seed left a connection open to the Template Database ${databaseName} ` +
+        `(${sessions} session(s) still connected after 2 s) — disconnect your client ` +
+        "(e.g. await db.$disconnect()) before the seed returns",
     );
   }
 }
