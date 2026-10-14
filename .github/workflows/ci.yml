@@ -15,11 +15,30 @@ concurrency:
 
 jobs:
   ci:
-    name: ci
+    name: ci (${{ matrix.node }})
     runs-on: ubuntu-latest
+    # `floor` runs the gate on the lowest Node package.json `engines.node` advertises, so
+    # the floor is exercised rather than merely claimed; `24` is the current LTS line.
+    # Not fail-fast: the point of two legs is knowing which Node line broke.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["floor", "24"]
 
     steps:
       - uses: actions/checkout@v7
+
+      # One source of truth: pnpm-workspace.yaml's `nodeVersion`, which
+      # tests/node-floor.test.ts keeps equal to the `engines.node` minimum.
+      - name: Resolve Node floor
+        id: floor
+        run: |
+          version=$(sed -n 's/^nodeVersion: *//p' pnpm-workspace.yaml)
+          if ! printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "Expected 'nodeVersion: x.y.z' in pnpm-workspace.yaml, got '$version'." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -29,7 +48,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ matrix.node == 'floor' && steps.floor.outputs.version || matrix.node }}
           cache: pnpm
 
       - name: Install dependencies

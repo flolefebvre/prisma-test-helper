@@ -6,3 +6,11 @@ allowBuilds:
   prisma: true
   protobufjs: false
   ssh2: false
+
+# Every install checks the whole resolved tree's `engines` against our advertised Node
+# floor, not against whatever Node runs pnpm: a dependency that raises its own floor fails
+# `pnpm add` / `pnpm install` here, before a consumer finds out. `nodeVersion` must equal
+# the minimum of package.json `engines.node` (tests/node-floor.test.ts enforces it), and
+# CI's `floor` leg runs the gate on exactly this version.
+engineStrict: true
+nodeVersion: 22.22.0

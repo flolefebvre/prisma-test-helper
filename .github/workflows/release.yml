@@ -58,8 +58,9 @@ jobs:
             console.log('Tag and manifest agree on ' + version);
           "
 
-  # The everyday gate, unmodified: typecheck, lint, duplication, unit + integration suites
-  # (real Postgres container), build, and the tarball-contents assertion.
+  # The everyday gate, unmodified, on both Node legs (floor and 24): typecheck, lint,
+  # duplication, unit + integration suites (real Postgres container), build, and the
+  # tarball-contents assertion. `needs: ci` waits for every leg.
   ci:
     name: ci
     needs: guard
@@ -92,7 +93,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          # The Node floor check comes from pnpm-workspace.yaml (engineStrict + nodeVersion).
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
           # Never cache in a release build: the tarball should come from a cold, clean
           # resolve of the committed lockfile.
