@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
@@ -9,6 +8,8 @@ import { getContainerRuntimeClient } from "testcontainers";
 // below attaches to it; erased from the emitted JS.
 import type {} from "vitest";
 import type { TestProject } from "vitest/node";
+
+import { cloneCommand, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
   interface ProvidedContext {
@@ -28,7 +29,7 @@ export interface CreateGlobalSetupOptions {
   /**
    * Postgres image to run. Pin it to the same major as your production database, so a
    * test never runs against a different Postgres than the one you deploy on.
-   * @default "postgres:17-alpine"
+   * @default "postgres:18-alpine"
    */
   image?: string;
   /**
@@ -41,6 +42,8 @@ export interface CreateGlobalSetupOptions {
 
 // initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
 // PGDATA must therefore be a subdirectory the container creates itself.
+// From 18 the image's VOLUME is /var/lib/postgresql: this tmpfs nests inside it, the
+// data directory still lives on tmpfs, and the empty volume goes with the container at stop.
 const PGDATA_MOUNT = "/var/lib/postgresql/data";
 const PGDATA = `${PGDATA_MOUNT}/pgdata`;
 
@@ -61,7 +64,7 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * need a lock; cloning before workers exist needs none.
  */
 export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
-  const { image = "postgres:17-alpine", databaseName = "prisma_test" } = options;
+  const { image = "postgres:18-alpine", databaseName = "prisma_test" } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
     await assertDockerReachable();
@@ -100,25 +103,6 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
       await container.stop();
     };
   };
-}
-
-/**
- * How many Worker Databases to provision.
- *
- * `maxWorkers` is resolved lazily inside the pool, so at globalSetup time the config
- * carries it only when set explicitly (config file or CLI). Without one, Vitest
- * derives its worker count from `availableParallelism()` — minus one in run mode,
- * halved in watch mode — so the undiminished value is an upper bound on every pool
- * id in both modes, at the cost of spare clones: one in run mode, up to half the
- * cores in watch mode. Vitest resolves `maxWorkers` with a truthy check — `0` means
- * "unset", not "zero workers" — so this falls through on `0` the same way, or a
- * `--maxWorkers=0` run would find no database provisioned. Exported for that test.
- *
- * @example
- * workerCount(project); // 4 when maxWorkers is 4; availableParallelism() when unset or 0
- */
-export function workerCount(project: TestProject): number {
-  return project.config.maxWorkers || project.vitest.config.maxWorkers || os.availableParallelism();
 }
 
 /**
@@ -189,37 +173,6 @@ function resolvePrismaBin(): string {
 }
 
 /**
- * The psql argv that clones every Worker Database (`<databaseName>_1..workerCount`)
- * from the template in a single invocation. Each clone is its own `--command` flag:
- * psql runs a multi-statement `--command` in an implicit transaction, and
- * `CREATE DATABASE` refuses to run inside one. `ON_ERROR_STOP` makes the first
- * failed clone abort the invocation with a non-zero exit, since psql otherwise
- * continues past errors and exits 0. Exported so the argv can be unit-tested
- * without a container.
- *
- * @example
- * cloneCommand("prisma_test", "postgres", 2)
- * // → ["psql", "--username", "postgres", "--dbname", "postgres",
- * //    "--set", "ON_ERROR_STOP=1",
- * //    "--command", 'CREATE DATABASE "prisma_test_1" TEMPLATE "prisma_test"',
- * //    "--command", 'CREATE DATABASE "prisma_test_2" TEMPLATE "prisma_test"']
- */
-export function cloneCommand(
-  databaseName: string,
-  username: string,
-  workerCount: number,
-): string[] {
-  const argv = ["psql", "--username", username, "--dbname", "postgres", "--set", "ON_ERROR_STOP=1"];
-  for (let workerId = 1; workerId <= workerCount; workerId++) {
-    argv.push(
-      "--command",
-      `CREATE DATABASE "${databaseName}_${workerId}" TEMPLATE "${databaseName}"`,
-    );
-  }
-  return argv;
-}
-
-/**
  * Clone the migrated template into the Worker Databases, via `psql` inside the
  * container — over the local socket, which the official image trusts, so no
  * client library or credentials are involved. One exec covers every clone: the
@@ -228,10 +181,10 @@ export function cloneCommand(
 async function cloneWorkerDatabases(
   postgres: StartedPostgreSqlContainer,
   databaseName: string,
-  workerCount: number,
+  count: number,
 ): Promise<void> {
   const { exitCode, output } = await postgres.exec(
-    cloneCommand(databaseName, postgres.getUsername(), workerCount),
+    cloneCommand(databaseName, postgres.getUsername(), count),
   );
   if (exitCode !== 0) {
     throw new Error(`cloning the Worker Databases from ${databaseName} failed:\n${output}`);

@@ -58,24 +58,22 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Check packed contents
+      # tests/package-files.test.ts owns the tarball contract (what may ship, every docs
+      # page, every link). It runs before the build, so the built entry points are
+      # checked here, once `dist/` exists.
+      - name: Check built entry points are packed
         run: |
-          npm pack --dry-run --json > pack.json
+          npm pack --dry-run --json --ignore-scripts > pack.json
           node --input-type=module -e "
             import { readFileSync } from 'node:fs';
             const [{ files }] = JSON.parse(readFileSync('pack.json', 'utf8'));
             const paths = files.map((file) => file.path);
-            const allowed = /^(dist\/|README\.md\$|LICENSE\$|package\.json\$)/;
-            const stray = paths.filter((path) => !allowed.test(path));
-            if (stray.length > 0) {
-              console.error('Unexpected files in tarball:', stray);
+            const missing = ['dist/index.js', 'dist/global-setup.js', 'dist/setup.js'].filter(
+              (entry) => !paths.includes(entry),
+            );
+            if (missing.length > 0) {
+              console.error('Missing from tarball:', missing);
               process.exit(1);
-            }
-            for (const entry of ['dist/index.js', 'dist/global-setup.js', 'dist/setup.js']) {
-              if (!paths.includes(entry)) {
-                console.error(entry + ' missing from tarball');
-                process.exit(1);
-              }
             }
             console.log('Tarball OK:', paths.join(', '));
           "

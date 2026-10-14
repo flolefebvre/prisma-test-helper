@@ -1,5 +1,7 @@
 import { inject } from "vitest";
 
+import { workerDatabaseUrl } from "./worker-database.js";
+
 // The `/setup` entry: what a consumer's Vitest `setupFiles` module imports. It runs
 // once per test file, inside the worker, before any app module loads — see the ordering
 // note on `setupWorkerDatabase`.
@@ -55,30 +57,11 @@ export function setupWorkerDatabase(): WorkerDatabase {
       "No Template Database was provided to this run — @flefebvre/prisma-test-helper's " +
         "global setup did not run. Add a global-setup file exporting " +
         "`createGlobalSetup()` and register it in your Vitest config as " +
-        '`globalSetup: ["test/global-setup.ts"]`.',
+        '`globalSetup: ["tests/global-setup.ts"]`.',
     );
   }
 
   const databaseUrl = workerDatabaseUrl(templateUri, databaseName, poolId);
   process.env.DATABASE_URL = databaseUrl;
   return { databaseUrl, databaseName };
-}
-
-/**
- * Swap the database in a connection URI for this worker's clone, keeping everything
- * else — credentials, host, port, query parameters — untouched. Exported so the rewrite
- * can be unit-tested without a container.
- *
- * @example
- * workerDatabaseUrl("postgresql://u:p@host:5432/prisma_test", "prisma_test", "1");
- * // → "postgresql://u:p@host:5432/prisma_test_1"
- */
-export function workerDatabaseUrl(
-  templateUri: string,
-  databaseName: string,
-  poolId: string,
-): string {
-  const url = new URL(templateUri);
-  url.pathname = `/${databaseName}_${poolId}`;
-  return url.toString();
 }
