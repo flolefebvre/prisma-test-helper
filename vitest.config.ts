@@ -22,12 +22,13 @@ export default defineConfig({
   test: {
     projects: [
       // Docker-free: everything under src/ runs against mocked testcontainers, and
-      // tests/package-files.test.ts checks the tarball through `npm pack --dry-run`.
+      // tests/package-files.test.ts checks the tarball through `npm pack --dry-run`;
+      // tests/node-floor.test.ts keeps pnpm's `nodeVersion` on the `engines.node` floor.
       {
         test: {
           name: "unit",
           environment: "node",
-          include: ["src/**/*.test.ts", "tests/package-files.test.ts"],
+          include: ["src/**/*.test.ts", "tests/package-files.test.ts", "tests/node-floor.test.ts"],
           clearMocks: true,
           restoreMocks: true,
           // Same maxWorkers as the integration projects, so all share one group —
