@@ -394,6 +394,21 @@ describe("buildVacuumProbe", () => {
   test("is undefined when no table is ever probed", () => {
     expect(buildVacuumProbe([])).toBeUndefined();
     expect(buildVacuumProbe([measurement])).toBeUndefined();
+    expect(buildVacuumProbe([measurement], [])).toBeUndefined();
+  });
+
+  test("lists every Baseline table, unprobed, under the same guard", () => {
+    const category = { schema: "public", name: "Category", relkind: "r" } as const;
+    const reading = { schema: "public", name: "Reading", relkind: "p" } as const;
+
+    const probe = buildVacuumProbe([author], [category, reading])!;
+
+    expect(probe).toContain(
+      `${buildVacuumProbe([author])} UNION ALL SELECT b.name FROM unnest(ARRAY[` +
+        '\'"public"."Category"\', \'"public"."Reading"\']::text[]) AS b(name) WHERE NOT EXISTS (',
+    );
+    expect(probe.match(/pg_stat_activity/g)).toHaveLength(2);
+    expect(buildVacuumProbe([], [category])).toMatch(/^SELECT b\.name FROM unnest/);
   });
 });
 
@@ -531,13 +546,13 @@ describe("prepareReset", () => {
       ]);
     });
 
-    test("leaves Baseline tables out of the vacuum probe", async () => {
+    test("never probes a Baseline table's heap, but always vacuums it", async () => {
       const { client, queries } = stubClient("prisma_test_1", withBaseline);
 
       const { vacuum } = await prepareReset(client, WORKER_URL, "prisma_test");
       await vacuum();
 
-      expect(queries.at(-1)).toBe(buildVacuumProbe([author, measurement]));
+      expect(queries.at(-1)).toBe(buildVacuumProbe([author, measurement], [category]));
     });
   });
 

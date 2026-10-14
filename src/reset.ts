@@ -352,13 +352,33 @@ const NO_OTHER_OPEN_TRANSACTION =
  * Build the query behind the `VACUUM` between files: one row per table whose heap file
  * is not 0 bytes, its quoted name in `name` — or no rows at all while another session of
  * the database has a transaction open. Partitioned parents are left out, as the Reset
- * never probes them. `undefined` when no table is ever probed, so there is nothing to
- * ask. Pure: unit-tested without a database.
+ * never probes them.
+ *
+ * Every Baseline table (`baseline`) is listed too, under the same guard, unprobed: its
+ * heap is never empty. Each restore leaves the old rows dead, and without a `VACUUM`
+ * the restore's `DELETE` scans an ever larger heap — measured in
+ * docs/adr/0002-baseline-restore.md: at 20 workers, restoring 2,000 rows went from
+ * 43 ms to 160 ms per Reset over 8 files, and stayed near 49 ms with this `VACUUM`.
+ * `undefined` when there is no table to ask about. Pure: unit-tested without a database.
  */
-export function buildVacuumProbe(tables: readonly ResetTable[]): string | undefined {
+export function buildVacuumProbe(
+  tables: readonly ResetTable[],
+  baseline: readonly ResetTable[] = [],
+): string | undefined {
   const probed = tables.filter((table) => table.relkind !== "p");
-  if (probed.length === 0) return undefined;
-  return `SELECT t.item AS name ${dirtyItems(probed, probed.map(quoted))} AND ${NO_OTHER_OPEN_TRANSACTION}`;
+  const queries: string[] = [];
+  if (probed.length > 0) {
+    queries.push(
+      `SELECT t.item AS name ${dirtyItems(probed, probed.map(quoted))} AND ${NO_OTHER_OPEN_TRANSACTION}`,
+    );
+  }
+  if (baseline.length > 0) {
+    const names = baseline.map((table) => literal(quoted(table))).join(", ");
+    queries.push(
+      `SELECT b.name FROM unnest(ARRAY[${names}]::text[]) AS b(name) WHERE ${NO_OTHER_OPEN_TRANSACTION}`,
+    );
+  }
+  return queries.length > 0 ? queries.join(" UNION ALL ") : undefined;
 }
 
 /** What {@link prepareReset} resolves to: the Reset, and the `VACUUM` between files. */
@@ -367,7 +387,8 @@ export interface PreparedReset {
   reset(): Promise<void>;
   /**
    * `VACUUM (SKIP_LOCKED)` the tables whose heap file is not 0 bytes, so the next file's
-   * first Reset on a fresh backend can skip them unopened. Best effort: it sends nothing
+   * first Reset on a fresh backend can skip them unopened, and every Baseline table, so
+   * the dead rows its restores left do not slow the next file's. Best effort: it sends nothing
    * when no table is dirty (a bare `VACUUM` would process the whole database) or another
    * session has a transaction open, and it never rejects — the Reset is correct without
    * it, only slower.
@@ -421,9 +442,9 @@ export async function prepareReset(
         : { ...sequence, snapshot: { lastValue: last_value, isCalled: is_called === true } };
     });
   const statement = buildResetStatement(tables, sequences, baseline);
-  // Baseline tables stay out: their heaps are never empty, so they would always look
-  // dirty to the probe.
-  const vacuumProbe = buildVacuumProbe(tables);
+  // Baseline tables are never probed — their heaps are never empty — but always
+  // vacuumed, as restores leave their old rows dead.
+  const vacuumProbe = buildVacuumProbe(tables, baseline);
 
   return {
     async reset() {

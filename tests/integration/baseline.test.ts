@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { setupDatabase } from "../../src/index.js";
-import { DISCOVERY_QUERY, type DiscoveredRelation } from "../../src/reset.js";
+import { DISCOVERY_QUERY, prepareReset, type DiscoveredRelation } from "../../src/reset.js";
 import { db } from "../db/client.js";
 
 // The Baseline as a consumer relies on it: the rows the fixture's second migration
@@ -195,6 +195,36 @@ describe("a role with no privilege on the harness schema", () => {
 
   test("…and the next test sees the Baseline restored", async () => {
     expect(await categories()).toEqual(CATEGORIES);
+  });
+});
+
+describe("the VACUUM between files", () => {
+  test("vacuums every Baseline table, the restored ones' dead rows with them", async () => {
+    // VACUUM reports to the shared statistics as it finishes; earlier files on this
+    // Worker Database may have vacuumed too, so the count is compared, not read.
+    const counts = async () =>
+      Object.fromEntries(
+        (
+          await db.$queryRawUnsafe<{ relname: string; n: number }[]>(
+            `SELECT relname::text, vacuum_count::int AS n FROM pg_stat_user_tables
+             WHERE schemaname = 'public' AND relname IN ('Category', 'Reading_2025', 'Reading_2026')`,
+          )
+        ).map(({ relname, n }) => [relname, n]),
+      );
+    // Arrange: a restore, which leaves the old rows of `Category` dead.
+    await db.category.update({ where: { id: 1 }, data: { name: "rewritten" } });
+    const prepared = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
+    await prepared.reset();
+    const before = await counts();
+
+    // Act
+    await prepared.vacuum();
+
+    // Assert
+    const after = await counts();
+    for (const table of ["Category", "Reading_2025", "Reading_2026"]) {
+      expect(after[table], table).toBe((before[table] ?? 0) + 1);
+    }
   });
 });
 
