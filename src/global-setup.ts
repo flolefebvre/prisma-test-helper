@@ -2,8 +2,6 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { getContainerRuntimeClient } from "testcontainers";
 // Brings the "vitest" module into the program so the ProvidedContext augmentation
 // below attaches to it; erased from the emitted JS.
 import type {} from "vitest";
@@ -20,15 +18,19 @@ import {
   snapshotStatement,
   type BaselineCandidate,
 } from "./baseline.js";
-import { postgresCommand, type PostgresSettingValue } from "./postgres-command.js";
-import { cloneStatements, databaseUrl, workerCount } from "./worker-database.js";
+import { startContainerServer } from "./container-server.js";
+import type { PostgresSettingValue } from "./postgres-command.js";
+import { ignoredOptionsWarning, resolveServerMode, type ServerHandle } from "./server.js";
+import { openUrlServer } from "./url-server.js";
+import { cloneStatements, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
   interface ProvidedContext {
-    /** Connection URI of this run's container, pointing at the Template Database. */
+    /** Connection URI of this run's server, pointing at the Template Database. */
     templateDatabaseUri: string;
     /**
-     * Name of the Template Database the Worker Databases were cloned from. Workers
+     * Name of the Template Database the Worker Databases were cloned from — in url mode,
+     * `<databaseName>_<run id>`. Workers
      * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Worker Database
      * guard derives the shape it admits from it.
      */
@@ -95,21 +97,33 @@ export interface CreateGlobalSetupOptions {
    * // run in a migration or in `seed`.
    */
   postgresSettings?: Record<string, PostgresSettingValue>;
+  /**
+   * Connection URL of an existing Postgres server to run against instead of starting a
+   * container. Any database on the server will do: the harness connects through it only
+   * to create and drop the run's own databases, and never writes into it. The role must
+   * be a superuser, and the server Postgres 13 or later.
+   *
+   * The run's Template Database is then `<databaseName>_<run id>` (8 hex characters), its
+   * Worker Databases `<databaseName>_<run id>_1..N`, so several runs can share one
+   * server; teardown drops exactly those. The container's tuning does not apply: the
+   * server's own settings decide speed. Refused alongside `image` or `postgresSettings`.
+   *
+   * The `PRISMA_TEST_HELPER_URL` environment variable, when non-empty, overrides it. An
+   * empty string counts as unset: the run starts a container.
+   *
+   * @example
+   * export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
+   */
+  url?: string;
 }
-
-// initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
-// PGDATA must therefore be a subdirectory the container creates itself.
-// From 18 the image's VOLUME is /var/lib/postgresql: this tmpfs nests inside it, the
-// data directory still lives on tmpfs, and the empty volume goes with the container at stop.
-const PGDATA_MOUNT = "/var/lib/postgresql/data";
-const PGDATA = `${PGDATA_MOUNT}/pgdata`;
 
 /**
  * Build a Vitest `globalSetup` function: `export default createGlobalSetup()` from the
  * file your `globalSetup` config points at.
  *
  * It runs once per test run, in the main process, before any worker is forked. It
- * starts one throwaway Postgres on a random host port, migrates the Template Database
+ * starts one throwaway Postgres on a random host port — or, in url mode, creates a
+ * Template Database unique to the run on an existing server — migrates the Template Database
  * with the consumer project's own `prisma migrate deploy`, and clones one Worker
  * Database per worker slot: `<databaseName>_1..maxWorkers`. `VITEST_POOL_ID` is always
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
@@ -118,8 +132,10 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * After migrate it runs the consumer's `seed`, when one is given, and checks that the
  * seed left no connection open to the template. Then it installs the harness schema in
  * the template and snapshots its Baseline — the rows the migrations and the seed
- * inserted — over a connection to the template that is closed before cloning starts. The clones run here, over one admin connection to the `postgres` database that is
- * closed before this returns, while nothing is connected to the template.
+ * inserted — over a connection to the template that is closed before cloning starts.
+ * The clones run here, over one admin connection to another database on the server
+ * (the container's `postgres`, or the database the `url` names) that is closed before
+ * this returns, while nothing is connected to the template.
  * `CREATE DATABASE … TEMPLATE` fails when the template has other connections
  * (SQLSTATE 55006), which is why cloning from inside workers would need a lock;
  * cloning before workers exist needs none.
@@ -133,69 +149,52 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
   } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
-    // Built first: a malformed setting name is a config error, reported as such even
-    // when Docker is down, and never after a container started.
-    const command = postgresCommand(postgresSettings);
-    await assertDockerReachable();
-
-    const container = await new PostgreSqlContainer(image)
-      .withDatabase(databaseName)
-      .withEnvironment({ PGDATA })
-      .withTmpFs({ [PGDATA_MOUNT]: "rw,noexec,nosuid" })
-      .withCommand(command)
-      .start();
-
-    try {
-      migrate(container.getConnectionUri());
-      if (seed !== undefined) {
-        await runSeed(seed, container.getConnectionUri());
-        await assertTemplateReleased(
-          databaseUrl(container.getConnectionUri(), "postgres"),
-          databaseName,
-        );
-      }
-      await installBaseline(container.getConnectionUri(), databaseName);
-      await cloneWorkerDatabases(
-        databaseUrl(container.getConnectionUri(), "postgres"),
+    // Resolved first: a conflicting config is reported as such, before any Docker probe
+    // or connection.
+    const mode = resolveServerMode(options, process.env);
+    let server: ServerHandle;
+    if (mode.kind === "container") {
+      server = await startContainerServer({ image, databaseName, postgresSettings });
+    } else {
+      if (mode.ignored.length > 0) console.warn(ignoredOptionsWarning(mode.ignored));
+      server = await openUrlServer({
+        url: mode.url,
+        source: mode.source,
         databaseName,
-        workerCount(project),
-      );
-    } catch (error) {
-      // A failed stop (e.g. the daemon died, failing migrate and stop alike) must not
-      // mask the diagnostic error being thrown; Ryuk reaps the container regardless.
-      await container.stop().catch(() => {});
-      throw error;
+        workerCount: workerCount(project),
+      });
     }
+    await provision(server, project, seed);
 
-    project.provide("templateDatabaseUri", container.getConnectionUri());
-    project.provide("templateDatabaseName", databaseName);
+    project.provide("templateDatabaseUri", server.templateUrl);
+    project.provide("templateDatabaseName", server.templateName);
 
-    // Ryuk is the backstop: it removes the whole session even when Vitest is killed
-    // and this teardown never runs.
-    return async function teardown(): Promise<void> {
-      await container.stop();
-    };
+    return server.teardown;
   };
 }
 
 /**
- * Fail with an actionable message when no container runtime answers.
- *
- * Testcontainers tries each connection strategy in turn and reports only that they all
- * failed, naming sockets rather than the missing dependency. Probing here separates
- * "Docker is not running" — the one failure a reader is expected to hit and fix — from
- * every other startup failure, which keeps its own error rather than being relabelled.
+ * The one pipeline every server goes through: migrate the template, seed it, install
+ * the Baseline, clone the Worker Databases. When any step fails the server is torn down
+ * before the error propagates — a failed teardown (e.g. the daemon died, failing migrate
+ * and stop alike) must not mask the diagnostic error being thrown.
  */
-async function assertDockerReachable(): Promise<void> {
+async function provision(
+  server: ServerHandle,
+  project: TestProject,
+  seed: CreateGlobalSetupOptions["seed"],
+): Promise<void> {
   try {
-    await getContainerRuntimeClient();
-  } catch (cause) {
-    throw new Error(
-      "The test suite could not reach a container runtime. " +
-        "@flefebvre/prisma-test-helper starts a Postgres container for the run, so " +
-        "Docker must be running — start Docker and run the tests again.",
-      { cause },
-    );
+    migrate(server.templateUrl);
+    if (seed !== undefined) {
+      await runSeed(seed, server.templateUrl);
+      await assertTemplateReleased(server.adminUrl, server.templateName);
+    }
+    await installBaseline(server.templateUrl, server.templateName);
+    await cloneWorkerDatabases(server.adminUrl, server.templateName, workerCount(project));
+  } catch (error) {
+    await server.teardown().catch(() => {});
+    throw error;
   }
 }
 

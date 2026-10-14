@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, inject, test } from "vitest";
 
 import { setupDatabase } from "../../src/index.js";
 import { DISCOVERY_QUERY, prepareReset, type DiscoveredRelation } from "../../src/reset.js";
@@ -168,12 +168,14 @@ describe("dirty marks", () => {
 
 describe("a role with no privilege on the harness schema", () => {
   // Roles are cluster-wide and the container outlives a watch-mode rerun, so it is
-  // created only when missing.
+  // created only when missing. In url mode a concurrent run on the same server may be
+  // creating it at the same moment: the loser of that race gets `unique_violation`, not
+  // `duplicate_object`.
   const ROLE = "baseline_writer";
 
   test("writes a Baseline table", async () => {
     await db.$executeRawUnsafe(
-      `DO $$ BEGIN CREATE ROLE ${ROLE}; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN CREATE ROLE ${ROLE}; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$`,
     );
     await db.$executeRawUnsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON "Category" TO ${ROLE}`);
     await db.$executeRawUnsafe(`GRANT USAGE ON SEQUENCE "Category_id_seq" TO ${ROLE}`);
@@ -213,7 +215,11 @@ describe("the VACUUM between files", () => {
       );
     // Arrange: a restore, which leaves the old rows of `Category` dead.
     await db.category.update({ where: { id: 1 }, data: { name: "rewritten" } });
-    const prepared = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
+    const prepared = await prepareReset(
+      db,
+      process.env.DATABASE_URL!,
+      inject("templateDatabaseName"),
+    );
     await prepared.reset();
     const before = await counts();
 

@@ -104,7 +104,9 @@ Builds the Vitest global setup that owns the container and the Template Database
 runs once per test run, in the main process, before any worker is forked. It starts one
 throwaway Postgres, migrates the Template Database with your project's own
 `prisma migrate deploy`, runs your `seed` if you gave one, clones one Worker Database per
-Vitest worker slot, and removes the container when the run ends.
+Vitest worker slot, and removes the container when the run ends. Given a [`url`](#the-url-option),
+it runs the same lifecycle on an existing server instead of a container, and drops the
+databases it created when the run ends.
 
 | Option             | Default              | What it does                                                                                                                                                                                                                       |
 | ------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -112,6 +114,7 @@ Vitest worker slot, and removes the container when the run ends.
 | `databaseName`     | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                                                                                                               |
 | `seed`             | none                 | Your project's own seed function, run once per run on the Template Database, after migrate and before cloning. Every table it fills is a Baseline table: see [The `seed` option](#the-seed-option).                                |
 | `postgresSettings` | none                 | Postgres server settings for the container, each passed as `-c name=value`, over the built-in `fsync=off`, `synchronous_commit=off` and `full_page_writes=off`: see [The `postgresSettings` option](#the-postgressettings-option). |
+| `url`              | none                 | Connection URL of an existing Postgres server to run against instead of starting a container. `PRISMA_TEST_HELPER_URL` overrides it. Refused alongside `image` or `postgresSettings`: see [The `url` option](#the-url-option).     |
 
 ### The `seed` option
 
@@ -206,6 +209,58 @@ objects an extension owns.
   fails the run with `postgresSettings: invalid setting name`, before the container
   starts.
 
+### The `url` option
+
+```ts
+url?: string;
+```
+
+Runs the suite against an existing Postgres server instead of starting a container: a
+server you already run for development, several checkouts of one project sharing one
+server, or a Postgres service container in CI. Docker is not needed then.
+
+```ts
+// tests/global-setup.ts
+import { createGlobalSetup } from "@flefebvre/prisma-test-helper/global-setup";
+
+export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
+```
+
+The lifecycle is the same as with a container: create the Template Database, migrate it,
+run your `seed`, clone the Worker Databases, and remove everything at the end.
+
+- **Any database on the server.** The URL may name `postgres` or any other database: the
+  harness connects through it only to create and drop the run's own databases, and never
+  writes into it. The Template Database and Worker Database URLs are the same URL with
+  another database name.
+- **Names unique to the run.** The Template Database is `<databaseName>_<run id>`, where
+  the run id is 8 random hex characters (`prisma_test_3f9a01bc`), and the Worker Databases
+  are `<databaseName>_<run id>_1..N`. Two runs against one server never collide.
+  `inject("templateDatabaseName")` returns the full name, run id included. Postgres
+  truncates names over 63 bytes, so a `databaseName` that would push
+  `<databaseName>_<run id>_<N>` over that fails the run before it connects.
+- **Checked before anything is created.** The role must be a superuser, and the server
+  Postgres 13 or later: see [Running against an existing server](setup.md#running-against-an-existing-server).
+- **Teardown.** When the run ends, or when setup fails partway, the harness drops its
+  template and every Worker Database with `DROP DATABASE IF EXISTS … WITH (FORCE)`. It
+  never touches a database whose name it did not derive for this run. A run that is
+  killed before teardown leaves its databases behind.
+- **No container tuning.** The container's tmpfs data directory, `fsync=off`,
+  `synchronous_commit=off` and `full_page_writes=off` do not apply: the server's own
+  settings decide how fast the suite runs.
+
+**`PRISMA_TEST_HELPER_URL`.** When this environment variable is set and non-empty, it
+overrides `url`, so one developer can point their runs at a server without changing the
+shared config. An empty or unset variable falls back to `url`; with neither set, the run
+starts a container.
+
+**Conflicts.** `url` passed together with `image` or `postgresSettings` fails the run,
+before any connection, with `url: cannot be combined with image` (or `postgresSettings`):
+those options configure the container, and there is none. When the URL comes from
+`PRISMA_TEST_HELPER_URL` instead, those options are ignored, not refused, and the run
+prints one line to stderr saying so: a shared config that pins `image` keeps working
+on the machine that sets the variable.
+
 ### Typed `inject`
 
 The global setup `provide`s two values to your tests, fully typed:
@@ -214,7 +269,7 @@ The global setup `provide`s two values to your tests, fully typed:
 import { inject } from "vitest";
 
 const uri = inject("templateDatabaseUri"); // connection URI of the Template Database
-const name = inject("templateDatabaseName"); // the Template Database's name
+const name = inject("templateDatabaseName"); // the Template Database's name (with the run id in url mode)
 ```
 
 Typing works only if your global-setup file is part of your TypeScript program: that file
@@ -276,6 +331,8 @@ interface CreateGlobalSetupOptions {
   image?: string;
   databaseName?: string;
   seed?: (databaseUrl: string) => void | Promise<void>;
+  postgresSettings?: Record<string, string | number | boolean>;
+  url?: string;
 }
 ```
 

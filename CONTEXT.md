@@ -12,13 +12,26 @@ and the Vitest wiring. Factories are NOT part of the harness — they live in co
 projects and plug into its seams.
 
 **Template Database**:
-The database migrated once per run, then cloned once per worker slot. Between the two,
+The database migrated once per run, then cloned once per worker slot. Named
+`<databaseName>` in a container, `<databaseName>_<run id>` in url mode. Between the two,
 the harness snapshots its Baseline into the `prisma_test_helper` schema, so every clone
 inherits it. It never hosts a test, and the Reset refuses it.
 
 **Worker Database**:
 A per-worker-slot clone of the Template Database, named `<template>_<pool id>`. Tests
 commit to it for real. The only kind of database the Reset may empty.
+
+**url mode**:
+A run against an existing Postgres server, given by the `url` option or the
+`PRISMA_TEST_HELPER_URL` environment variable, instead of a container the harness
+starts. Same lifecycle; teardown drops the databases the run created instead of removing
+a container.
+_Avoid_: external mode, shared mode
+
+**Run id**:
+8 random hex characters that make a url-mode run's database names unique on a server
+other runs may share: the Template Database `<databaseName>_<run id>` and its Worker
+Databases `<databaseName>_<run id>_<pool id>`. A container run has none.
 
 **Baseline**:
 The rows `prisma migrate deploy`, and the consumer's global-setup `seed` when there is

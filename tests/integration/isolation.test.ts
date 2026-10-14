@@ -1,5 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { afterAll, beforeAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, inject, test } from "vitest";
 
 import { setupDatabase } from "../../src/index.js";
 import { db } from "../db/client.js";
@@ -27,7 +27,9 @@ setupDatabase(db);
 test("points DATABASE_URL at this worker's Worker Database", () => {
   // Assert: the setup file's rewrite landed — this is the wiring every other guarantee
   // in the suite rests on.
-  expect(process.env.DATABASE_URL).toContain(`/prisma_test_${process.env.VITEST_POOL_ID}`);
+  expect(process.env.DATABASE_URL).toContain(
+    `/${inject("templateDatabaseName")}_${process.env.VITEST_POOL_ID}`,
+  );
 });
 
 test("a write commits, so a second client sees it mid-test", async () => {
