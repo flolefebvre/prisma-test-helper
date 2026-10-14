@@ -268,7 +268,8 @@ async function assertTemplateReleased(adminUrl: string, databaseName: string): P
   if (sessions > 0) {
     throw new Error(
       `the seed left a connection open to the Template Database ${databaseName} ` +
-        `(${sessions} session(s) still connected after 2 s) — disconnect your client ` +
+        `(${sessions} session(s) still connected after ` +
+        `${(RELEASE_ATTEMPTS * RELEASE_INTERVAL_MS) / 1000} s) — disconnect your client ` +
         "(e.g. await db.$disconnect()) before the seed returns",
     );
   }
@@ -276,9 +277,9 @@ async function assertTemplateReleased(adminUrl: string, databaseName: string): P
 
 /**
  * Install the harness schema in the migrated template, and snapshot its Baseline: every
- * table that holds rows after migrate, with the sequences those tables own, plus the
- * triggers that track writes to them (docs/adr/0002-baseline-restore.md). Every Worker
- * Database inherits all of it when it is cloned.
+ * table that holds rows after migrations and the seed, with the sequences those tables
+ * own, plus the triggers that track writes to them (docs/adr/0002-baseline-restore.md).
+ * Every Worker Database inherits all of it when it is cloned.
  *
  * It connects to the template itself, which is why it must run, and close its
  * connection, before {@link cloneWorkerDatabases}: `withAdminConnection` closes it on

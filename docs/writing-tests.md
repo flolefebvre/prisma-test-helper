@@ -27,8 +27,9 @@ test("starts from a clean database: the author above is gone", async () => {
 The **Reset** is the cleanup. Before a file's first test and after every test, it empties
 every table and rewinds every sequence in one statement, so each test starts from an
 empty Worker Database with ids back at 1: no truncation of your own, no ordering
-constraints, no leftover rows. The one exception is rows your migrations inserted, which
-every test starts with: see [Rows your migrations insert](#rows-your-migrations-insert).
+constraints, no leftover rows. The one exception is rows your migrations and the seed
+inserted, which every test starts with: see
+[Rows your migrations insert](#rows-your-migrations-insert).
 
 ### Rows your migrations insert
 

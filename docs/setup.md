@@ -212,9 +212,9 @@ the [API reference](api.md#createglobalsetupoptions).
 
 **Feed reference data your project seeds outside its migrations.** Look for the project's
 seed: the script `migrations.seed` names in `prisma.config.ts`, and the function that
-script calls to insert reference data such as plans, roles or
-countries. Found one, and tests need those rows → pass a `seed` that builds its own client
-from the URL it receives, calls that function, and disconnects:
+script calls to insert reference data such as plans, roles or countries. Found one, and
+tests need those rows → pass a `seed` that builds its own client from the URL it
+receives, calls that function, and disconnects:
 
 ```ts
 export default createGlobalSetup({
