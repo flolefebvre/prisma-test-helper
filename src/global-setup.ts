@@ -20,6 +20,7 @@ import {
   snapshotStatement,
   type BaselineCandidate,
 } from "./baseline.js";
+import { postgresCommand, type PostgresSettingValue } from "./postgres-command.js";
 import { cloneStatements, databaseUrl, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
@@ -68,6 +69,32 @@ export interface CreateGlobalSetupOptions {
    * }
    */
   seed?: (databaseUrl: string) => void | Promise<void>;
+  /**
+   * Postgres server settings for the run's container, each passed as `-c name=value` on
+   * the server command line, so even settings that only take effect at server start
+   * (`shared_preload_libraries`) apply. Booleans become `on` / `off`, numbers are
+   * stringified, and values are passed as-is: Postgres itself refuses a bad value at
+   * startup.
+   *
+   * The container always starts with `fsync=off`, `synchronous_commit=off` and
+   * `full_page_writes=off`. An entry of the same name overrides that default
+   * (`fsync: true`), and the others stay in place; a default cannot be removed, only
+   * given another value.
+   *
+   * A name must be lowercase letters, digits and underscores, optionally prefixed by an
+   * extension's name and a dot (`auto_explain.log_min_duration`); any other name fails
+   * the run before the container starts.
+   *
+   * @example
+   * postgresSettings: {
+   *   shared_preload_libraries: "pg_stat_statements",
+   *   log_min_duration_statement: 0,
+   *   autovacuum: false,
+   * }
+   * // The pg_stat_statements view exists only after `CREATE EXTENSION pg_stat_statements`,
+   * // run in a migration or in `seed`.
+   */
+  postgresSettings?: Record<string, PostgresSettingValue>;
 }
 
 // initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
@@ -98,24 +125,24 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * cloning before workers exist needs none.
  */
 export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
-  const { image = "postgres:18-alpine", databaseName = "prisma_test", seed } = options;
+  const {
+    image = "postgres:18-alpine",
+    databaseName = "prisma_test",
+    seed,
+    postgresSettings,
+  } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
+    // Built first: a malformed setting name is a config error, reported as such even
+    // when Docker is down, and never after a container started.
+    const command = postgresCommand(postgresSettings);
     await assertDockerReachable();
 
     const container = await new PostgreSqlContainer(image)
       .withDatabase(databaseName)
       .withEnvironment({ PGDATA })
       .withTmpFs({ [PGDATA_MOUNT]: "rw,noexec,nosuid" })
-      .withCommand([
-        "postgres",
-        "-c",
-        "fsync=off",
-        "-c",
-        "synchronous_commit=off",
-        "-c",
-        "full_page_writes=off",
-      ])
+      .withCommand(command)
       .start();
 
     try {

@@ -11,6 +11,7 @@ import {
   type BaselineCandidate,
 } from "./baseline.js";
 import { createGlobalSetup } from "./global-setup.js";
+import { postgresCommand } from "./postgres-command.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -20,7 +21,7 @@ const runtime = vi.hoisted(() => ({
 vi.mock("testcontainers", () => runtime);
 
 // A chainable stand-in for PostgreSqlContainer that records what the setup asked
-// for (image, database) and hands out one fake started container per run.
+// for (image, database, server command) and hands out one fake started container per run.
 const postgres = vi.hoisted(() => {
   const started = {
     getConnectionUri: () => "postgresql://test:test@localhost:32768/prisma_test",
@@ -28,6 +29,7 @@ const postgres = vi.hoisted(() => {
   };
   const images: string[] = [];
   const databases: string[] = [];
+  const commands: string[][] = [];
   class PostgreSqlContainer {
     constructor(image: string) {
       images.push(image);
@@ -42,14 +44,15 @@ const postgres = vi.hoisted(() => {
     withTmpFs() {
       return this;
     }
-    withCommand() {
+    withCommand(command: string[]) {
+      commands.push(command);
       return this;
     }
     async start() {
       return started;
     }
   }
-  return { PostgreSqlContainer, started, images, databases };
+  return { PostgreSqlContainer, started, images, databases, commands };
 });
 vi.mock("@testcontainers/postgresql", () => ({
   PostgreSqlContainer: postgres.PostgreSqlContainer,
@@ -106,6 +109,7 @@ vi.mock("pg", () => ({ default: { Client: pg.Client } }));
 beforeEach(() => {
   postgres.images.length = 0;
   postgres.databases.length = 0;
+  postgres.commands.length = 0;
   pg.connections.length = 0;
   pg.queries.length = 0;
   pg.events.length = 0;
@@ -153,6 +157,37 @@ describe("createGlobalSetup", () => {
       'CREATE DATABASE "acme_test_1" TEMPLATE "acme_test"',
       'CREATE DATABASE "acme_test_2" TEMPLATE "acme_test"',
     ]);
+  });
+
+  describe("postgresSettings", () => {
+    test("starts the container with the built-in defaults when none are given", async () => {
+      await runSetup();
+
+      expect(postgres.commands).toEqual([postgresCommand()]);
+    });
+
+    test("starts the container with the command built from the settings", async () => {
+      const postgresSettings = { fsync: true, log_min_duration_statement: 0 };
+      await runSetup({ postgresSettings });
+
+      expect(postgres.commands).toEqual([postgresCommand(postgresSettings)]);
+    });
+
+    // A config error must read as one: reported even when Docker is down, and never
+    // after a container started.
+    test("fails naming the invalid key before probing Docker or starting a container", async () => {
+      runtime.getContainerRuntimeClient.mockClear();
+
+      const error = await runSetup({ postgresSettings: { "log-statement": "all" } }).catch(
+        (thrown: unknown) => thrown,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/^postgresSettings: .*"log-statement"/);
+      expect((error as Error).message).not.toMatch(/Docker/);
+      expect(runtime.getContainerRuntimeClient).not.toHaveBeenCalled();
+      expect(postgres.images).toHaveLength(0);
+    });
   });
 
   // `CREATE DATABASE` refuses the implicit transaction of a multi-statement query, so

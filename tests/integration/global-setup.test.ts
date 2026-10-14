@@ -4,7 +4,8 @@ import { expect, inject, onTestFinished, test } from "vitest";
 import { PrismaClient } from "../generated/prisma/client.js";
 
 // These tests run against the container the repo's own globalSetup file
-// (tests/global-setup.ts) started with the documented defaults: Template Database
+// (tests/global-setup.ts) started with the documented defaults, plus one
+// `postgresSettings` entry (`log_checkpoints: false`): Template Database
 // `prisma_test`, migrated with the fixture schema, cloned into `prisma_test_1..2`
 // (the integration project pins maxWorkers to 2).
 
@@ -64,6 +65,20 @@ test("provisions one Worker Database per worker slot", async () => {
   >`SELECT datname FROM pg_database WHERE datname LIKE 'prisma_test_%' ORDER BY datname`;
 
   expect(rows.map((row) => row.datname)).toEqual(["prisma_test_1", "prisma_test_2"]);
+});
+
+test("starts the server with postgresSettings applied over the built-in defaults", async () => {
+  const template = clientFor(inject("templateDatabaseUri"));
+  const show = async (name: string) => {
+    const [row] = await template.$queryRawUnsafe<Record<string, string>[]>(`SHOW ${name}`);
+    return row?.[name];
+  };
+
+  expect(await show("log_checkpoints")).toBe("off");
+  // The override merge keeps every default the settings did not name.
+  expect(await show("fsync")).toBe("off");
+  expect(await show("synchronous_commit")).toBe("off");
+  expect(await show("full_page_writes")).toBe("off");
 });
 
 test("provides the Template Database name alongside the URI", () => {
