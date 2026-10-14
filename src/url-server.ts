@@ -8,8 +8,9 @@
 // there. Each run therefore holds one admin connection for its whole life, carrying an
 // advisory lock keyed by its run id, and marks every database it creates with a Run
 // marker. That connection goes to the server's `postgres` database, whatever the URL
-// names: advisory locks are per database, and every run must see every other's. At startup the Sweep drops the marked databases of every run whose lock is
-// free — a run whose session is gone — and leaves those of a live run alone.
+// names: advisory locks are per database, and every run must see every other's. At
+// startup the Sweep drops the marked databases of every run whose lock is free — a run
+// whose session is gone — and leaves those of a live run alone.
 
 import {
   openAdminConnection,
