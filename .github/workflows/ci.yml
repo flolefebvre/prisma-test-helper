@@ -74,6 +74,10 @@ jobs:
       - name: Integration tests
         run: pnpm run test:integration
 
+      # End-to-end proof of the isolate: false opt-in: the unit tests pin the mechanics, this pins the mode.
+      - name: "Integration tests (isolate: false)"
+        run: pnpm run test:integration-no-isolate
+
       - name: Build
         run: pnpm run build
 
