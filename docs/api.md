@@ -106,11 +106,12 @@ throwaway Postgres, migrates the Template Database with your project's own
 `prisma migrate deploy`, runs your `seed` if you gave one, clones one Worker Database per
 Vitest worker slot, and removes the container when the run ends.
 
-| Option         | Default              | What it does                                                                                                                                                                                        |
-| -------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `image`        | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on.                                                  |
-| `databaseName` | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                                                                                |
-| `seed`         | none                 | Your project's own seed function, run once per run on the Template Database, after migrate and before cloning. Every table it fills is a Baseline table: see [The `seed` option](#the-seed-option). |
+| Option             | Default              | What it does                                                                                                                                                                                                                       |
+| ------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image`            | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on.                                                                                 |
+| `databaseName`     | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                                                                                                               |
+| `seed`             | none                 | Your project's own seed function, run once per run on the Template Database, after migrate and before cloning. Every table it fills is a Baseline table: see [The `seed` option](#the-seed-option).                                |
+| `postgresSettings` | none                 | Postgres server settings for the container, each passed as `-c name=value`, over the built-in `fsync=off`, `synchronous_commit=off` and `full_page_writes=off`: see [The `postgresSettings` option](#the-postgressettings-option). |
 
 ### The `seed` option
 
@@ -163,6 +164,47 @@ export default createGlobalSetup({
 
 This `seed` is unrelated to the Reset Hook's `seed`, the per-test number a
 [Reset Hook](#registerresethookhook) receives.
+
+### The `postgresSettings` option
+
+```ts
+postgresSettings?: Record<string, string | number | boolean>;
+```
+
+Passes Postgres server settings to the run's container. Each entry becomes
+`-c name=value` on the server command line, so settings that only take effect at server
+start, such as `shared_preload_libraries`, work too:
+
+```ts
+// tests/global-setup.ts
+import { createGlobalSetup } from "@flefebvre/prisma-test-helper/global-setup";
+
+export default createGlobalSetup({
+  postgresSettings: {
+    shared_preload_libraries: "pg_stat_statements", // profile a slow suite
+    log_min_duration_statement: 0, // log every statement with its duration
+    autovacuum: false, // stable measurements
+  },
+});
+```
+
+The `pg_stat_statements` view exists only after `CREATE EXTENSION pg_stat_statements`,
+run in a migration or in the [`seed`](#the-seed-option); the Reset never touches the
+objects an extension owns.
+
+- **Built-in defaults.** The container always starts with `fsync=off`,
+  `synchronous_commit=off` and `full_page_writes=off`: a throwaway database needs no
+  durability, and every write is faster without it.
+- **Override only.** An entry with the same name as a default replaces it, for example
+  `fsync: true`; the other defaults stay in place. A default cannot be removed, only
+  given another value.
+- **Values.** Booleans become `on` / `off` and numbers are stringified. Strings are
+  passed as-is, with no shell involved, so they need no quoting. Postgres checks the
+  values itself: a bad one fails the container's startup with Postgres's own message.
+- **Names.** A name is lowercase letters, digits and underscores, optionally prefixed by
+  an extension's name and a dot, such as `auto_explain.log_min_duration`. Any other name
+  fails the run with `postgresSettings: invalid setting name`, before the container
+  starts.
 
 ### Typed `inject`
 
