@@ -74,6 +74,9 @@ One run of your test suite goes through this lifecycle:
    any Baseline table the test wrote to.
 6. The container is removed when the run ends.
 
+Already running Postgres? Pass a [`url`](docs/api.md#the-url-option) and the same
+lifecycle runs on that server, under database names unique to the run, with no container.
+
 Migrations run once, clones are cheap, and the Reset is one planned statement — so the
 per-test overhead is a few milliseconds (about 7 ms at 73 tables, 10 ms with 20 workers
 resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
@@ -85,7 +88,9 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 - **Node ^22.12, ^24 or >= 26**, as Vitest 5 requires. The package ships ESM only, but
   your project need not be — the wiring runs under Vitest, which transforms modules
   through Vite, so a CommonJS project (a stock Next.js app, say) works too.
-- **Docker** (or another container runtime Testcontainers can reach).
+- **Docker** (or another container runtime Testcontainers can reach), or an existing
+  Postgres 13+ server you point the run at with the
+  [`url` option](docs/api.md#the-url-option) or `PRISMA_TEST_HELPER_URL`.
 - Peer dependencies: **Vitest ^5.0.3** and **Prisma ^7**, with your migrations committed
   (`prisma migrate deploy` is what the harness runs).
 - A Postgres superuser for the Reset. The container's user is one, so there is nothing to

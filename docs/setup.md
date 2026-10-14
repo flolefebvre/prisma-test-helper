@@ -19,7 +19,9 @@ Confirm every requirement before touching a file:
 - Committed migrations under the schema's migrations directory. The harness runs
   `prisma migrate deploy`, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. Without it the wiring can still be written, but the
-  check in [step 6](#6-prove-it-works) cannot run until Docker is started.
+  check in [step 6](#6-prove-it-works) cannot run until Docker is started. A run pointed
+  at an existing Postgres server needs no Docker: see
+  [Running against an existing server](#running-against-an-existing-server).
 - A Postgres superuser. The Reset sets `session_replication_role` and reads `pg_stat_file`
   and `pg_stat_activity`, which need one. The container the harness starts connects as
   its superuser, so there is nothing to do. The harness needs this of any server it runs
@@ -242,6 +244,39 @@ will not typecheck.
 **Done when:** the file exists, exports the setup as `default`, pins the image when a
 compose file names one, passes a `seed` when the project seeds reference data its tests
 need, and is inside the TypeScript program.
+
+### Running against an existing server
+
+By default every run starts its own container. To use a Postgres server that is already
+running instead (your development server, a server several checkouts share, or a CI
+service container), pass its URL:
+
+```ts
+export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
+```
+
+Or leave the config alone and set `PRISMA_TEST_HELPER_URL` on the machine that should use
+a server: when non-empty it overrides `url`, and any `image` or `postgresSettings` in the
+config is ignored, with one line on stderr. Details: [The `url` option](api.md#the-url-option).
+
+Requirements, checked when the run starts, before any database is created:
+
+- **A superuser role.** The URL's role must be a Postgres superuser: the Reset sets
+  `session_replication_role` and reads `pg_stat_file`. A role that is not fails the run,
+  naming the role.
+- **Postgres 13 or later.** Teardown drops the run's databases with
+  `DROP DATABASE … WITH (FORCE)`, which Postgres 13 introduced.
+- **Reachable from the test process.** The global setup and every worker connect to it
+  directly, from the machine running Vitest.
+
+Trade-off: the container's tuning (a tmpfs data directory, `fsync=off`,
+`synchronous_commit=off`, `full_page_writes=off`) does not apply. The server's own
+settings decide how fast migrate, the clones and every test write run, and a durable
+server is slower than the throwaway container.
+
+Each run creates `<databaseName>_<run id>` and its Worker Databases, and drops them when it
+ends, so runs sharing a server never collide. A run that is killed before its teardown
+leaves its databases behind; drop them by hand.
 
 ## 4. Per-worker setup
 
