@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // What both integration projects share: the per-worker wiring the README prescribes.
 const integration = {
@@ -55,7 +55,9 @@ export default defineConfig({
           ...integration,
           name: "integration-url",
           include: ["tests/integration/**/*.test.ts", "tests/url-mode/**/*.test.ts"],
-          exclude: ["tests/integration/container.test.ts"],
+          // `exclude` replaces Vitest's defaults (node_modules, dist, …) instead of
+          // extending them: spread them back so a wider `include` stays safe.
+          exclude: [...configDefaults.exclude, "tests/integration/container.test.ts"],
           globalSetup: ["tests/global-setup-url.ts"],
         },
       },
