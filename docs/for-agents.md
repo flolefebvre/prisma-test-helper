@@ -14,10 +14,14 @@ run; migrations applied once to a **Template Database**; one **Worker Database**
 from it per Vitest worker slot. Tests commit to their Worker Database for real, through
 the app's own Prisma client, with nothing mocked. The **Reset** empties every table and
 rewinds every sequence in one statement, before a file's first test and after every test,
-so each test starts from an empty database. A file opts in with `setupDatabase(db)`;
+so each test starts from an empty database, except for the rows the migrations insert:
+those tables form the **Baseline**, which the Reset restores whenever a test wrote to
+them (partitioned ones after every test). A file opts in with `setupDatabase(db)`;
 **Reset Hooks** registered with `registerResetHook` run in every `beforeEach` and receive
 `{ testName, seed }`, the seam for the project's own factories. The design rationale is
-[ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
+[ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md),
+and for the Baseline
+[ADR 0002](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0002-baseline-restore.md).
 
 ## Import map
 

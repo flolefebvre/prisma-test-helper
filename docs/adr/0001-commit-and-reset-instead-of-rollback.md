@@ -109,7 +109,9 @@ directory, `fsync=off`), against a 50-table schema with foreign keys and indexes
 - **Seeding is a follow-up.** Restoring a seeded baseline instead of resetting to empty
   measured 7 / 19 / 91 ms per test at 20 / 200 / 2000 rows per table. Per-file baselines,
   which would make `beforeAll` fixtures last for a whole file, belong to that follow-up,
-  not to this decision.
+  not to this decision. _Followed up by
+  [ADR 0002](0002-baseline-restore.md): rows the migrations insert form a Baseline that
+  the Reset restores, and only for the tables a test wrote to._
 - **The setup file shrinks to `setupWorkerDatabase()`.** The ordering rule (no static app
   imports there) still holds, because the client must be built after `DATABASE_URL` is
   set. A violation still fails loudly: either the client module's own unset-variable

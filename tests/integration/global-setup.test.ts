@@ -22,6 +22,27 @@ test("migrates the fixture schema into the Template Database", async () => {
   await expect(template.post.count()).resolves.toBe(0);
 });
 
+test("snapshots the template's non-empty tables into the harness schema", async () => {
+  const template = clientFor(inject("templateDatabaseUri"));
+
+  // `Category` and `Reading` hold the rows the fixture's migrations insert; `Author` and
+  // `Post` are empty, so they stay out of the Baseline.
+  const catalog = await template.$queryRawUnsafe<{ name: string; relkind: string }[]>(
+    "SELECT name, relkind FROM prisma_test_helper.baseline ORDER BY ordinal",
+  );
+  expect(catalog).toEqual([
+    { name: "Category", relkind: "r" },
+    { name: "Reading", relkind: "p" },
+  ]);
+  const sequences = await template.$queryRawUnsafe<
+    { name: string; last_value: string; is_called: boolean }[]
+  >("SELECT name, last_value::text, is_called FROM prisma_test_helper.sequence ORDER BY name");
+  expect(sequences).toEqual([
+    { name: "Category_id_seq", last_value: "3", is_called: true },
+    { name: "Reading_id_seq", last_value: "2", is_called: true },
+  ]);
+});
+
 test("provisions one Worker Database per worker slot", async () => {
   const template = clientFor(inject("templateDatabaseUri"));
 
