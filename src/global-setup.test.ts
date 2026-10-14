@@ -52,13 +52,13 @@ vi.mock("@testcontainers/postgresql", () => ({
 // every query it was sent. `failOn` makes the query matching it reject the way pg does,
 // with Postgres's message.
 const pg = vi.hoisted(() => {
-  const connections: string[] = [];
+  const connections: { connectionString: string; ssl?: unknown }[] = [];
   const queries: string[] = [];
-  const ended = { count: 0 };
+  const ended = { count: 0, failWith: undefined as string | undefined };
   const failure: { failOn?: string; message?: string } = {};
   class Client {
-    constructor(config: { connectionString: string }) {
-      connections.push(config.connectionString);
+    constructor(config: { connectionString: string; ssl?: unknown }) {
+      connections.push(config);
     }
     async connect() {}
     async query(sql: string) {
@@ -70,6 +70,7 @@ const pg = vi.hoisted(() => {
     }
     async end() {
       ended.count++;
+      if (ended.failWith !== undefined) throw new Error(ended.failWith);
     }
   }
   return { Client, connections, queries, ended, failure };
@@ -82,6 +83,7 @@ beforeEach(() => {
   pg.connections.length = 0;
   pg.queries.length = 0;
   pg.ended.count = 0;
+  pg.ended.failWith = undefined;
   delete pg.failure.failOn;
   delete pg.failure.message;
 });
@@ -138,7 +140,19 @@ describe("createGlobalSetup", () => {
   test("clones over one admin connection to the postgres database", async () => {
     await runSetup();
 
-    expect(pg.connections).toEqual(["postgresql://test:test@localhost:32768/postgres"]);
+    expect(pg.connections).toEqual([
+      expect.objectContaining({
+        connectionString: "postgresql://test:test@localhost:32768/postgres",
+      }),
+    ]);
+  });
+
+  // The container speaks plaintext. Left unset, pg would take TLS from the host's
+  // PGSSLMODE (`prefer` and `require` both mean TLS to pg) and fail to connect.
+  test("connects without TLS unless the URL asks for it", async () => {
+    await runSetup();
+
+    expect(pg.connections).toEqual([expect.objectContaining({ ssl: false })]);
   });
 
   test("closes the admin connection before the run starts", async () => {
@@ -238,5 +252,14 @@ describe("createGlobalSetup", () => {
 
     await expect(runSetup()).rejects.toThrow(/boom/);
     expect(pg.ended.count).toBe(1);
+  });
+
+  test("keeps the clone error when closing the admin connection also fails", async () => {
+    pg.failure.failOn = '"prisma_test_1"';
+    pg.failure.message = 'database "prisma_test_1" already exists';
+    pg.ended.failWith = "Connection terminated unexpectedly";
+
+    await expect(runSetup()).rejects.toThrow(/failed at prisma_test_1: .*already exists/);
+    expect(postgres.started.stop).toHaveBeenCalledTimes(1);
   });
 });

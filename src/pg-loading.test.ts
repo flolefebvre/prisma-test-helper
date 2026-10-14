@@ -29,7 +29,7 @@ test("importing the /global-setup entry does not load pg either", async () => {
 });
 
 // The positive control: without it, a probe that never fires would pass the test above.
-// It runs second, as the flag cannot be reset once pg is loaded.
+// It runs last, as the flag cannot be reset once pg is loaded.
 test("the probe fires when pg is imported", async () => {
   await import("pg");
 

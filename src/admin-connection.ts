@@ -21,7 +21,9 @@ export interface AdminConnection {
  * Open an admin connection to `url`, hand it to `use`, and close it once `use` settles —
  * on success and on failure alike, so no admin connection outlives the work it was opened
  * for (an open connection to a template database makes `CREATE DATABASE … TEMPLATE` fail
- * with SQLSTATE 55006). A failed connect rejects with `pg`'s own error.
+ * with SQLSTATE 55006). When `use` fails, its error is what rejects, even if the close
+ * fails too; on success a failed close rejects. A failed connect rejects with `pg`'s own
+ * error.
  *
  * @example
  * await withAdminConnection("postgresql://u:p@host:5432/postgres", async (connection) => {
@@ -33,11 +35,17 @@ export async function withAdminConnection<T>(
   use: (connection: AdminConnection) => Promise<T>,
 ): Promise<T> {
   const { connection, close } = await open(url);
+  let result: T;
   try {
-    return await use(connection);
-  } finally {
-    await close();
+    result = await use(connection);
+  } catch (error) {
+    // As with the container stop in `createGlobalSetup`: a failed close must not mask
+    // the diagnostic error being thrown.
+    await close().catch(() => {});
+    throw error;
   }
+  await close();
+  return result;
 }
 
 /** Connect to `url`; the caller owns closing it. */
@@ -45,7 +53,10 @@ async function open(
   url: string,
 ): Promise<{ connection: AdminConnection; close: () => Promise<void> }> {
   const { default: pg } = await import("pg");
-  const client: Client = new pg.Client({ connectionString: url });
+  // `ssl: false` is the default only: an `sslmode` in the URL still overrides it. Without
+  // it pg would fall back to the host's PGSSLMODE — which the old in-container path never
+  // saw — and fail against a plaintext server where the URL asked for nothing.
+  const client: Client = new pg.Client({ connectionString: url, ssl: false });
   await client.connect();
   return {
     connection: {
