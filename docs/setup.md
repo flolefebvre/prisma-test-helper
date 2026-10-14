@@ -14,8 +14,8 @@ Confirm every requirement before touching a file:
 
 - `prisma` and `@prisma/client` at **^7**, `vitest` at **^5.0.3**. On older versions,
   upgrade first; the harness does not support them.
-- Node **^22.12, ^24 or >= 26**, as Vitest 5 requires (check `engines`, `.nvmrc`, or
-  `node -v`).
+- Node **^22.22, ^24 or >= 26**, as Vitest 5 and Testcontainers require (check `engines`,
+  `.nvmrc`, or `node -v`).
 - Committed migrations under the schema's migrations directory. The harness runs
   `prisma migrate deploy`, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. Without it the wiring can still be written, but the
