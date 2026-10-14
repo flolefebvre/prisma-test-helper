@@ -62,7 +62,7 @@ vi.mock("@testcontainers/postgresql", () => ({
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
 // first query containing a key resolve with those rows (a function answers each such
-// query anew).
+// query anew). `connect` makes every connect reject with that message.
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
   const queries: string[] = [];
@@ -74,7 +74,7 @@ const pg = vi.hoisted(() => {
     failWith: undefined as string | undefined,
     failFor: undefined as string | undefined,
   };
-  const failure: { failOn?: string; message?: string } = {};
+  const failure: { failOn?: string; message?: string; connect?: string } = {};
   class Client {
     readonly database: string;
     constructor(config: { connectionString: string; ssl?: unknown }) {
@@ -82,6 +82,7 @@ const pg = vi.hoisted(() => {
       this.database = new URL(config.connectionString).pathname.slice(1);
     }
     async connect() {
+      if (failure.connect !== undefined) throw new Error(failure.connect);
       events.push(`open ${this.database}`);
     }
     async query(sql: string) {
@@ -119,6 +120,13 @@ beforeEach(() => {
   pg.ended.failFor = undefined;
   delete pg.failure.failOn;
   delete pg.failure.message;
+  delete pg.failure.connect;
+  vi.stubEnv("PRISMA_TEST_HELPER_URL", "");
+});
+
+// A developer may have PRISMA_TEST_HELPER_URL set: every test starts with it empty.
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 function projectWith(maxWorkers: number | undefined): TestProject {
@@ -547,5 +555,196 @@ describe("createGlobalSetup", () => {
 
     await expect(runSetup()).rejects.toThrow(/failed at prisma_test_1: .*already exists/);
     expect(postgres.started.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createGlobalSetup in url mode", () => {
+  const SERVER = "postgresql://app:s3cret@db.internal:5432/postgres";
+  const REDACTED = "postgresql://app:***@db.internal:5432/postgres";
+  const TEMPLATE = /^prisma_test_[0-9a-f]{8}$/;
+  const check = (row: Record<string, unknown> = {}) =>
+    pg.answers.set("rolsuper", [
+      { role: "app", superuser: true, version_num: 180000, version: "18.0", ...row },
+    ]);
+
+  beforeEach(() => {
+    runtime.getContainerRuntimeClient.mockClear();
+    check();
+  });
+
+  /** The Template Database name the run provided to the workers. */
+  const providedTemplate = (project: TestProject): string =>
+    (project.provide as Mock).mock.calls.find(([key]) => key === "templateDatabaseName")![1];
+
+  const created = () => pg.queries.filter((query) => query.startsWith("CREATE DATABASE"));
+  const drops = () => pg.queries.filter((query) => query.startsWith("DROP DATABASE"));
+
+  test("starts no container and never probes Docker", async () => {
+    await runSetup({ url: SERVER });
+
+    expect(runtime.getContainerRuntimeClient).not.toHaveBeenCalled();
+    expect(postgres.images).toHaveLength(0);
+  });
+
+  test("checks the server, then creates a template unique to the run, then clones it", async () => {
+    const { project } = await runSetup({ url: SERVER });
+
+    const template = providedTemplate(project);
+    expect(template).toMatch(TEMPLATE);
+    expect(pg.queries[0]).toContain("rolsuper");
+    expect(created()).toEqual([
+      `CREATE DATABASE "${template}"`,
+      `CREATE DATABASE "${template}_1" TEMPLATE "${template}"`,
+      `CREATE DATABASE "${template}_2" TEMPLATE "${template}"`,
+    ]);
+  });
+
+  test("migrates and provides the template's URL on the given server", async () => {
+    const { project } = await runSetup({ url: SERVER });
+
+    const url = `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`;
+    expect((execFileSync as Mock).mock.calls[0]![2].env.DATABASE_URL).toBe(url);
+    expect(project.provide).toHaveBeenCalledWith("templateDatabaseUri", url);
+  });
+
+  // The URL may name any database: the harness connects through it, never writes into it.
+  test("does its admin work over the URL as given, and installs over the template", async () => {
+    const { project } = await runSetup({ url: SERVER });
+
+    expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
+      SERVER,
+      `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
+      SERVER,
+    ]);
+  });
+
+  test("gives each run its own template", async () => {
+    const first = providedTemplate((await runSetup({ url: SERVER })).project);
+    const second = providedTemplate((await runSetup({ url: SERVER })).project);
+
+    expect(first).not.toBe(second);
+  });
+
+  test("lets PRISMA_TEST_HELPER_URL override the url option", async () => {
+    vi.stubEnv("PRISMA_TEST_HELPER_URL", "postgresql://dev:pw@localhost:5433/app");
+
+    await runSetup({ url: SERVER });
+
+    expect(pg.connections[0]!.connectionString).toBe("postgresql://dev:pw@localhost:5433/app");
+  });
+
+  test("runs in url mode from PRISMA_TEST_HELPER_URL alone", async () => {
+    vi.stubEnv("PRISMA_TEST_HELPER_URL", SERVER);
+
+    const { project } = await runSetup();
+
+    expect(postgres.images).toHaveLength(0);
+    expect(providedTemplate(project)).toMatch(TEMPLATE);
+  });
+
+  test("starts a container when the url option is empty", async () => {
+    await runSetup({ url: "" });
+
+    expect(postgres.images).toEqual(["postgres:18-alpine"]);
+  });
+
+  test("refuses the url option alongside image or postgresSettings, before any I/O", async () => {
+    await expect(
+      runSetup({ url: SERVER, image: "postgres:16-alpine", postgresSettings: {} }),
+    ).rejects.toThrow(/^url: cannot be combined with image and postgresSettings/);
+    expect(runtime.getContainerRuntimeClient).not.toHaveBeenCalled();
+    expect(pg.connections).toHaveLength(0);
+  });
+
+  // The env var switches one machine over a shared config that pins `image`.
+  test("ignores image and postgresSettings under PRISMA_TEST_HELPER_URL, saying so on stderr", async () => {
+    vi.stubEnv("PRISMA_TEST_HELPER_URL", SERVER);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await runSetup({ image: "postgres:16-alpine", postgresSettings: { fsync: true } });
+
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "@flefebvre/prisma-test-helper: ignoring image and postgresSettings — " +
+        "PRISMA_TEST_HELPER_URL is set, so the run uses that server and starts no container.",
+    );
+    expect(postgres.images).toHaveLength(0);
+  });
+
+  test("refuses a role that is not a superuser before creating anything", async () => {
+    check({ superuser: false });
+
+    await expect(runSetup({ url: SERVER })).rejects.toThrow(
+      `the role "app" on the Postgres server ${REDACTED} is not a superuser`,
+    );
+    expect(created()).toEqual([]);
+    expect(drops()).toEqual([]);
+  });
+
+  test("refuses a server older than Postgres 13 before creating anything", async () => {
+    check({ version_num: 120022, version: "12.22" });
+
+    await expect(runSetup({ url: SERVER })).rejects.toThrow(/runs Postgres 12\.22 — url mode/);
+    expect(created()).toEqual([]);
+  });
+
+  test("refuses a databaseName too long for the run's names before connecting", async () => {
+    await expect(
+      runSetup({ url: SERVER, databaseName: "d".repeat(52) }, projectWith(10)),
+    ).rejects.toThrow(/^databaseName: "d+" is too long for url mode/);
+    expect(pg.connections).toHaveLength(0);
+  });
+
+  test("names the source and the redacted server when it cannot connect, keeping pg's error", async () => {
+    pg.failure.connect = "connect ECONNREFUSED 10.0.0.5:5432";
+
+    const error = (await runSetup({ url: SERVER }).catch((thrown: unknown) => thrown)) as Error;
+
+    expect(error.message).toBe(
+      `could not connect to the Postgres server given by \`url\` (${REDACTED}): ` +
+        "connect ECONNREFUSED 10.0.0.5:5432 — check that the server is reachable from the " +
+        "test process and the URL's credentials are right",
+    );
+    expect(error.cause).toMatchObject({ message: "connect ECONNREFUSED 10.0.0.5:5432" });
+    expect(error.message).not.toContain("s3cret");
+  });
+
+  test("teardown drops every Worker Database and the template, one query each", async () => {
+    const { teardown, project } = await runSetup({ url: SERVER });
+    const template = providedTemplate(project);
+    pg.connections.length = 0;
+
+    await teardown();
+
+    expect(drops()).toEqual([
+      `DROP DATABASE IF EXISTS "${template}_1" WITH (FORCE)`,
+      `DROP DATABASE IF EXISTS "${template}_2" WITH (FORCE)`,
+      `DROP DATABASE IF EXISTS "${template}" WITH (FORCE)`,
+    ]);
+    // Over a fresh admin connection, closed once done.
+    expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([SERVER]);
+    expect(pg.events.at(-1)).toBe("close postgres");
+  });
+
+  test("drops what the run derived when setup fails partway, keeping the diagnostic error", async () => {
+    pg.failure.failOn = '_2" TEMPLATE';
+    pg.failure.message = "disk full";
+
+    await expect(runSetup({ url: SERVER })).rejects.toThrow(
+      /failed at prisma_test_[0-9a-f]{8}_2: disk full/,
+    );
+    expect(drops()).toHaveLength(3);
+  });
+
+  test("teardown attempts every drop, then names each database it could not drop", async () => {
+    const { teardown, project } = await runSetup({ url: SERVER });
+    const template = providedTemplate(project);
+    pg.failure.failOn = `"${template}_1"`;
+    pg.failure.message = "permission denied";
+
+    await expect(teardown()).rejects.toThrow(
+      `could not drop this run's databases on ${REDACTED}: ${template}_1 (permission denied) — ` +
+        'drop them by hand with DROP DATABASE "<name>" WITH (FORCE)',
+    );
+    expect(drops()).toHaveLength(3);
   });
 });

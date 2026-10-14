@@ -31,14 +31,16 @@ export const URL_ENV_VAR = "PRISMA_TEST_HELPER_URL";
 /** The options that configure the container, and so mean nothing in url mode. */
 const CONTAINER_OPTIONS = ["image", "postgresSettings"] as const;
 
+/** What supplied a url-mode run's URL, as an error message names it. */
+export type UrlSource = "`url`" | `\`${typeof URL_ENV_VAR}\``;
+
 /** Where a run's server comes from. */
 export type ServerMode =
   | { kind: "container" }
   | {
       kind: "url";
       url: string;
-      /** What supplied the URL, as an error message names it. */
-      source: "`url`" | `\`${typeof URL_ENV_VAR}\``;
+      source: UrlSource;
       /** Container options the config carries that this mode ignores (env var only). */
       ignored: string[];
     };

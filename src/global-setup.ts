@@ -20,15 +20,17 @@ import {
 } from "./baseline.js";
 import { startContainerServer } from "./container-server.js";
 import type { PostgresSettingValue } from "./postgres-command.js";
-import type { ServerHandle } from "./server.js";
+import { ignoredOptionsWarning, resolveServerMode, type ServerHandle } from "./server.js";
+import { openUrlServer } from "./url-server.js";
 import { cloneStatements, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
   interface ProvidedContext {
-    /** Connection URI of this run's container, pointing at the Template Database. */
+    /** Connection URI of this run's server, pointing at the Template Database. */
     templateDatabaseUri: string;
     /**
-     * Name of the Template Database the Worker Databases were cloned from. Workers
+     * Name of the Template Database the Worker Databases were cloned from — in url mode,
+     * `<databaseName>_<run id>`. Workers
      * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Worker Database
      * guard derives the shape it admits from it.
      */
@@ -95,6 +97,24 @@ export interface CreateGlobalSetupOptions {
    * // run in a migration or in `seed`.
    */
   postgresSettings?: Record<string, PostgresSettingValue>;
+  /**
+   * Connection URL of an existing Postgres server to run against instead of starting a
+   * container. Any database on the server will do: the harness connects through it only
+   * to create and drop the run's own databases, and never writes into it. The role must
+   * be a superuser, and the server Postgres 13 or later.
+   *
+   * The run's Template Database is then `<databaseName>_<run id>` (8 hex characters), its
+   * Worker Databases `<databaseName>_<run id>_1..N`, so several runs can share one
+   * server; teardown drops exactly those. The container's tuning does not apply: the
+   * server's own settings decide speed. Refused alongside `image` or `postgresSettings`.
+   *
+   * The `PRISMA_TEST_HELPER_URL` environment variable, when non-empty, overrides it. An
+   * empty string counts as unset: the run starts a container.
+   *
+   * @example
+   * export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
+   */
+  url?: string;
 }
 
 /**
@@ -102,7 +122,8 @@ export interface CreateGlobalSetupOptions {
  * file your `globalSetup` config points at.
  *
  * It runs once per test run, in the main process, before any worker is forked. It
- * starts one throwaway Postgres on a random host port, migrates the Template Database
+ * starts one throwaway Postgres on a random host port — or, in url mode, creates a
+ * Template Database unique to the run on an existing server — migrates the Template Database
  * with the consumer project's own `prisma migrate deploy`, and clones one Worker
  * Database per worker slot: `<databaseName>_1..maxWorkers`. `VITEST_POOL_ID` is always
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
@@ -111,8 +132,10 @@ export interface CreateGlobalSetupOptions {
  * After migrate it runs the consumer's `seed`, when one is given, and checks that the
  * seed left no connection open to the template. Then it installs the harness schema in
  * the template and snapshots its Baseline — the rows the migrations and the seed
- * inserted — over a connection to the template that is closed before cloning starts. The clones run here, over one admin connection to the `postgres` database that is
- * closed before this returns, while nothing is connected to the template.
+ * inserted — over a connection to the template that is closed before cloning starts.
+ * The clones run here, over one admin connection to another database on the server
+ * (the container's `postgres`, or the database the `url` names) that is closed before
+ * this returns, while nothing is connected to the template.
  * `CREATE DATABASE … TEMPLATE` fails when the template has other connections
  * (SQLSTATE 55006), which is why cloning from inside workers would need a lock;
  * cloning before workers exist needs none.
@@ -126,7 +149,21 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
   } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
-    const server = await startContainerServer({ image, databaseName, postgresSettings });
+    // Resolved first: a conflicting config is reported as such, before any Docker probe
+    // or connection.
+    const mode = resolveServerMode(options, process.env);
+    let server: ServerHandle;
+    if (mode.kind === "container") {
+      server = await startContainerServer({ image, databaseName, postgresSettings });
+    } else {
+      if (mode.ignored.length > 0) console.warn(ignoredOptionsWarning(mode.ignored));
+      server = await openUrlServer({
+        url: mode.url,
+        source: mode.source,
+        databaseName,
+        workerCount: workerCount(project),
+      });
+    }
     await provision(server, project, seed);
 
     project.provide("templateDatabaseUri", server.templateUrl);
