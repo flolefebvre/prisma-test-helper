@@ -10,6 +10,15 @@ import type {} from "vitest";
 import type { TestProject } from "vitest/node";
 
 import { withAdminConnection } from "./admin-connection.js";
+import {
+  BASELINE_CANDIDATES_QUERY,
+  HARNESS_SCHEMA,
+  HARNESS_SCHEMA_STATEMENT,
+  nonEmptyTablesQuery,
+  planBaseline,
+  snapshotStatement,
+  type BaselineCandidate,
+} from "./baseline.js";
 import { cloneStatements, databaseUrl, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
@@ -59,7 +68,9 @@ const PGDATA = `${PGDATA_MOUNT}/pgdata`;
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
  * fork finds its database already provisioned.
  *
- * The clones run here, over one admin connection to the `postgres` database that is
+ * Between migrate and the clones, it installs the harness schema in the template and
+ * snapshots its Baseline — the rows the migrations inserted — over a connection to the
+ * template that is closed before cloning starts. The clones run here, over one admin connection to the `postgres` database that is
  * closed before this returns, while nothing is connected to the template.
  * `CREATE DATABASE … TEMPLATE` fails when the template has other connections
  * (SQLSTATE 55006), which is why cloning from inside workers would need a lock;
@@ -88,6 +99,7 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
 
     try {
       migrate(container.getConnectionUri());
+      await installBaseline(container.getConnectionUri(), databaseName);
       await cloneWorkerDatabases(
         databaseUrl(container.getConnectionUri(), "postgres"),
         databaseName,
@@ -176,6 +188,51 @@ function resolvePrismaBin(): string {
       { cause },
     );
   }
+}
+
+/**
+ * Install the harness schema in the migrated template, and snapshot its Baseline: every
+ * table that holds rows after migrate, with the sequences those tables own, plus the
+ * triggers that track writes to them (docs/adr/0002-baseline-restore.md). Every Worker
+ * Database inherits all of it when it is cloned.
+ *
+ * It connects to the template itself, which is why it must run, and close its
+ * connection, before {@link cloneWorkerDatabases}: `withAdminConnection` closes it on
+ * return. The SQL is built by the pure builders of `./baseline.js`; this only sends it.
+ */
+async function installBaseline(templateUrl: string, databaseName: string): Promise<void> {
+  await withAdminConnection(templateUrl, async (connection) => {
+    try {
+      await connection.query(HARNESS_SCHEMA_STATEMENT);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(
+        `could not create the harness schema "${HARNESS_SCHEMA}" in ${databaseName}: ${message}` +
+          ` — the harness owns that schema; your migrations must not create one by that name`,
+        { cause },
+      );
+    }
+    try {
+      const candidates = await connection.query<BaselineCandidate>(BASELINE_CANDIDATES_QUERY);
+      const nonEmptyQuery = nonEmptyTablesQuery(
+        candidates.filter((candidate) => candidate.kind === "table"),
+      );
+      const nonEmpty =
+        nonEmptyQuery === undefined ? [] : await connection.query<{ index: number }>(nonEmptyQuery);
+      const statement = snapshotStatement(
+        planBaseline(
+          candidates,
+          nonEmpty.map(({ index }) => index),
+        ),
+      );
+      if (statement !== undefined) await connection.query(statement);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(`snapshotting the Baseline of ${databaseName} failed: ${message}`, {
+        cause,
+      });
+    }
+  });
 }
 
 /**

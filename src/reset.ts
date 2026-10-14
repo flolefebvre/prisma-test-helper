@@ -7,6 +7,16 @@
 // Why DELETE and not TRUNCATE, why the DELETEs are gated on a storage probe, why a
 // VACUUM runs between files, and the numbers behind all three: docs/adr/0001.
 
+import {
+  literal,
+  OWNED_SEQUENCES_CTE,
+  quoted,
+  TABLES_CTE,
+  type QualifiedName,
+} from "./baseline.js";
+
+export type { QualifiedName } from "./baseline.js";
+
 /**
  * The slice of a Prisma client the Reset drives: one raw read (the guard's check, the
  * catalog discovery, the vacuum probe) and one raw write (the reset statement, the
@@ -17,12 +27,6 @@
 export interface ResetClient {
   $queryRawUnsafe(query: string, ...values: unknown[]): Promise<unknown>;
   $executeRawUnsafe(query: string, ...values: unknown[]): Promise<unknown>;
-}
-
-/** A schema-qualified relation name, unquoted — the Reset builder quotes it. */
-export interface QualifiedName {
-  schema: string;
-  name: string;
 }
 
 /**
@@ -68,32 +72,11 @@ export function assertWorkerDatabase(url: string, templateName: string): string 
  * test.
  */
 export const DISCOVERY_QUERY = `
-WITH tables AS (
-  SELECT c.oid, n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS relkind
-  FROM pg_catalog.pg_class c
-  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-  WHERE c.relkind IN ('r', 'p')
-    AND NOT c.relispartition
-    AND c.relpersistence <> 't'
-    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND n.nspname NOT LIKE 'pg\\_toast%'
-    AND c.relname <> '_prisma_migrations'
-    AND NOT EXISTS (
-      SELECT 1 FROM pg_catalog.pg_depend e
-      WHERE e.classid = 'pg_catalog.pg_class'::regclass AND e.objid = c.oid AND e.deptype = 'e'
-    )
-)
+WITH ${TABLES_CTE},
+${OWNED_SEQUENCES_CTE}
 SELECT 'table' AS kind, schema, name, relkind, NULL::text AS start_value FROM tables
 UNION ALL
-SELECT 'sequence', sn.nspname::text, s.relname::text, s.relkind::text, q.seqstart::text
-FROM pg_catalog.pg_class s
-JOIN pg_catalog.pg_namespace sn ON sn.oid = s.relnamespace
-JOIN pg_catalog.pg_sequence q ON q.seqrelid = s.oid
-JOIN pg_catalog.pg_depend d
-  ON d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = s.oid
-  AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.deptype IN ('a', 'i')
-JOIN tables t ON t.oid = d.refobjid
-WHERE s.relkind = 'S'
+SELECT 'sequence', schema, name, 'S', start_value FROM sequences
 ORDER BY 1, 2, 3`;
 
 /** One row of {@link DISCOVERY_QUERY}. */
@@ -259,16 +242,6 @@ export function buildVacuumProbe(tables: readonly ResetTable[]): string | undefi
   const probed = tables.filter((table) => table.relkind !== "p");
   if (probed.length === 0) return undefined;
   return `SELECT t.item AS name ${dirtyItems(probed, probed.map(quoted))} AND ${NO_OTHER_OPEN_TRANSACTION}`;
-}
-
-/** A schema-qualified, quoted SQL identifier: only `"` needs doubling. */
-function quoted({ schema, name }: QualifiedName): string {
-  return [schema, name].map((part) => `"${part.replaceAll('"', '""')}"`).join(".");
-}
-
-/** A SQL string literal. `standard_conforming_strings` is on, so only `'` needs doubling. */
-function literal(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
 }
 
 /** What {@link prepareReset} resolves to: the Reset, and the `VACUUM` between files. */
