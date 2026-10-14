@@ -51,10 +51,10 @@ import { databaseUrl } from "./worker-database.js";
  * the run opens the admin connection it holds until teardown — to the server's
  * `postgres` database, whatever database `url` names, because advisory locks are per
  * database — and one round-trip on it checks the role is a superuser and the server
- * Postgres 13+. The run then takes its own
- * lock, so no other run's Sweep can take it for dead, and sweeps the server. Only then is
- * the run's template, `<databaseName>_<run id>`, created — empty, from the server's default
- * template, ready to migrate — and marked. The admin URL is `url` itself; the handle's
+ * Postgres 13+. The run then takes its own lock, so no other run's Sweep can take it for
+ * dead, and sweeps the server. Only then is the run's template, `<databaseName>_<run id>`,
+ * created and marked, over a connection to `url` itself — empty, from the server's
+ * default template, ready to migrate. The admin URL is `url` itself; the handle's
  * `markStatement` marks each Worker Database the pipeline clones.
  *
  * The handle's teardown drops the run's Worker Databases `1..workerCount` and its
@@ -119,17 +119,22 @@ export async function openUrlServer(options: {
     assertServerUsable(check!, server);
     await held.connection.query(runLockStatement(runId));
     await sweep(held.connection, runId, server);
-    try {
-      await held.connection.query(`CREATE DATABASE "${templateName}"`);
-      created = true;
-      await held.connection.query(markStatement(templateName, runId));
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      throw new Error(
-        `could not create the Template Database ${templateName} on ${server}: ${message}`,
-        { cause },
-      );
-    }
+    // Over the URL as given, not the held connection: this is the run's first connection
+    // to it, so a URL whose own database is unreachable fails here, as such, before
+    // anything is created — and the clones and teardown will connect there too.
+    await withServer(url, source, async (connection) => {
+      try {
+        await connection.query(`CREATE DATABASE "${templateName}"`);
+        created = true;
+        await connection.query(markStatement(templateName, runId));
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        throw new Error(
+          `could not create the Template Database ${templateName} on ${server}: ${message}`,
+          { cause },
+        );
+      }
+    });
   } catch (error) {
     // Before the template exists there is nothing to drop; after, the teardown drops it.
     // Either way the held connection closes, and the startup error is what rejects.

@@ -75,9 +75,10 @@ vi.mock("@testcontainers/postgresql", () => ({
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
 // first query containing a key resolve with those rows (a function answers each such
-// query anew). `connect` makes every connect reject with that message (and `connectCode`
-// as its SQLSTATE). `errorListeners`
-// holds each client's `error` listener, so a test can drop a connection the way pg does.
+// query anew). `connect` makes every connect reject with that message, with `connectCode`
+// as its SQLSTATE — or only connects to the database `connectTo`, when set.
+// `errorListeners` holds each client's `error` listener, so a test can drop a connection
+// the way pg does.
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
   const errorListeners: ((error: Error) => void)[] = [];
@@ -90,7 +91,13 @@ const pg = vi.hoisted(() => {
     failWith: undefined as string | undefined,
     failFor: undefined as string | undefined,
   };
-  const failure: { failOn?: string; message?: string; connect?: string; connectCode?: string } = {};
+  const failure: {
+    failOn?: string;
+    message?: string;
+    connect?: string;
+    connectCode?: string;
+    connectTo?: string;
+  } = {};
   class Client {
     readonly database: string;
     constructor(config: { connectionString: string; ssl?: unknown }) {
@@ -102,7 +109,8 @@ const pg = vi.hoisted(() => {
       return this;
     }
     async connect() {
-      if (failure.connect !== undefined) {
+      const targeted = failure.connectTo === undefined || failure.connectTo === this.database;
+      if (failure.connect !== undefined && targeted) {
         throw Object.assign(new Error(failure.connect), { code: failure.connectCode });
       }
       events.push(`open ${this.database}`);
@@ -145,6 +153,7 @@ beforeEach(() => {
   delete pg.failure.message;
   delete pg.failure.connect;
   delete pg.failure.connectCode;
+  delete pg.failure.connectTo;
   vi.stubEnv("PRISMA_TEST_HELPER_URL", "");
 });
 
@@ -646,7 +655,9 @@ describe("createGlobalSetup in url mode", () => {
   test("does its admin work over the URL as given, and installs over the template", async () => {
     const { project } = await runSetup({ url: SERVER });
 
+    // The held connection, the template's creation, the install, the clones.
     expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
+      SERVER,
       SERVER,
       `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
       SERVER,
@@ -800,6 +811,12 @@ describe("createGlobalSetup in url mode", () => {
         { datname: `app_test_${LIVE}`, marker: runMarker(LIVE) },
         { datname: "prisma_test_0b1b2c3d", marker: `${runMarker("0b1b2c3d")} (kept)` },
       ]);
+    /** Nothing was created or dropped, and the held connection was the only one, closed. */
+    const expectNothingCreated = () => {
+      expect(created()).toEqual([]);
+      expect(drops()).toEqual([]);
+      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+    };
     // Only the dead run's lock is free.
     const deadRunUnlocked = () =>
       pg.answers.set("pg_try_advisory_lock", (sql) => [
@@ -816,6 +833,7 @@ describe("createGlobalSetup in url mode", () => {
 
       expect(pg.connections.map(({ connectionString }) => connectionString)).toEqual([
         SERVER,
+        app,
         `postgresql://app:s3cret@db.internal:5432/${providedTemplate(project)}`,
         app,
         app,
@@ -824,6 +842,25 @@ describe("createGlobalSetup in url mode", () => {
         SERVER_CHECK_QUERY,
         runLockStatement(runIdOf(project)),
       ]);
+    });
+
+    // The held connection reaches `postgres` even when the URL's own database is a typo:
+    // the run must still fail as unable to connect to that URL, before creating anything.
+    test("fails naming the URL before creating anything when only its database is unreachable", async () => {
+      const app = "postgresql://app:s3cret@db.internal:5432/apps";
+      pg.failure.connect = 'database "apps" does not exist';
+      pg.failure.connectCode = "3D000";
+      pg.failure.connectTo = "apps";
+
+      const error = (await runSetup({ url: app }).catch((thrown: unknown) => thrown)) as Error;
+
+      expect(error.message).toBe(
+        "could not connect to the Postgres server given by `url` " +
+          '(postgresql://app:***@db.internal:5432/apps): database "apps" does not exist — ' +
+          "check that the server is reachable from the test process and the URL's " +
+          "credentials are right",
+      );
+      expectNothingCreated();
     });
 
     test("fails before creating anything when the server has no postgres database", async () => {
@@ -935,9 +972,7 @@ describe("createGlobalSetup in url mode", () => {
       await expect(runSetup({ url: SERVER })).rejects.toThrow(
         "canceling statement due to statement timeout",
       );
-      expect(created()).toEqual([]);
-      expect(drops()).toEqual([]);
-      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+      expectNothingCreated();
     });
 
     test("closes its held connection when the server check refuses it", async () => {
@@ -955,8 +990,11 @@ describe("createGlobalSetup in url mode", () => {
         /^could not create the Template Database prisma_test_[0-9a-f]{8} on .*: must be owner/,
       );
       expect(drops()).toHaveLength(3);
+      // Held; the creation over the URL, closed; the teardown's drops, closed; then held.
       expect(pg.events).toEqual([
         "open postgres",
+        "open postgres",
+        "close postgres",
         "open postgres",
         "close postgres",
         "close postgres",
@@ -983,7 +1021,7 @@ describe("createGlobalSetup in url mode", () => {
         "close postgres",
         "close postgres",
       ]);
-      expect(pg.errorListeners).toHaveLength(4);
+      expect(pg.errorListeners).toHaveLength(5);
     });
 
     test("teardown closes the held connection even when a drop fails", async () => {
