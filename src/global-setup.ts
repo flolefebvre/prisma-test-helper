@@ -2,8 +2,6 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { getContainerRuntimeClient } from "testcontainers";
 // Brings the "vitest" module into the program so the ProvidedContext augmentation
 // below attaches to it; erased from the emitted JS.
 import type {} from "vitest";
@@ -20,8 +18,10 @@ import {
   snapshotStatement,
   type BaselineCandidate,
 } from "./baseline.js";
-import { postgresCommand, type PostgresSettingValue } from "./postgres-command.js";
-import { cloneStatements, databaseUrl, workerCount } from "./worker-database.js";
+import { startContainerServer } from "./container-server.js";
+import type { PostgresSettingValue } from "./postgres-command.js";
+import type { ServerHandle } from "./server.js";
+import { cloneStatements, workerCount } from "./worker-database.js";
 
 declare module "vitest" {
   interface ProvidedContext {
@@ -97,13 +97,6 @@ export interface CreateGlobalSetupOptions {
   postgresSettings?: Record<string, PostgresSettingValue>;
 }
 
-// initdb refuses a data directory it does not own, and a tmpfs mount is root-owned.
-// PGDATA must therefore be a subdirectory the container creates itself.
-// From 18 the image's VOLUME is /var/lib/postgresql: this tmpfs nests inside it, the
-// data directory still lives on tmpfs, and the empty volume goes with the container at stop.
-const PGDATA_MOUNT = "/var/lib/postgresql/data";
-const PGDATA = `${PGDATA_MOUNT}/pgdata`;
-
 /**
  * Build a Vitest `globalSetup` function: `export default createGlobalSetup()` from the
  * file your `globalSetup` config points at.
@@ -133,69 +126,38 @@ export function createGlobalSetup(options: CreateGlobalSetupOptions = {}) {
   } = options;
 
   return async function setup(project: TestProject): Promise<() => Promise<void>> {
-    // Built first: a malformed setting name is a config error, reported as such even
-    // when Docker is down, and never after a container started.
-    const command = postgresCommand(postgresSettings);
-    await assertDockerReachable();
+    const server = await startContainerServer({ image, databaseName, postgresSettings });
+    await provision(server, project, seed);
 
-    const container = await new PostgreSqlContainer(image)
-      .withDatabase(databaseName)
-      .withEnvironment({ PGDATA })
-      .withTmpFs({ [PGDATA_MOUNT]: "rw,noexec,nosuid" })
-      .withCommand(command)
-      .start();
+    project.provide("templateDatabaseUri", server.templateUrl);
+    project.provide("templateDatabaseName", server.templateName);
 
-    try {
-      migrate(container.getConnectionUri());
-      if (seed !== undefined) {
-        await runSeed(seed, container.getConnectionUri());
-        await assertTemplateReleased(
-          databaseUrl(container.getConnectionUri(), "postgres"),
-          databaseName,
-        );
-      }
-      await installBaseline(container.getConnectionUri(), databaseName);
-      await cloneWorkerDatabases(
-        databaseUrl(container.getConnectionUri(), "postgres"),
-        databaseName,
-        workerCount(project),
-      );
-    } catch (error) {
-      // A failed stop (e.g. the daemon died, failing migrate and stop alike) must not
-      // mask the diagnostic error being thrown; Ryuk reaps the container regardless.
-      await container.stop().catch(() => {});
-      throw error;
-    }
-
-    project.provide("templateDatabaseUri", container.getConnectionUri());
-    project.provide("templateDatabaseName", databaseName);
-
-    // Ryuk is the backstop: it removes the whole session even when Vitest is killed
-    // and this teardown never runs.
-    return async function teardown(): Promise<void> {
-      await container.stop();
-    };
+    return server.teardown;
   };
 }
 
 /**
- * Fail with an actionable message when no container runtime answers.
- *
- * Testcontainers tries each connection strategy in turn and reports only that they all
- * failed, naming sockets rather than the missing dependency. Probing here separates
- * "Docker is not running" — the one failure a reader is expected to hit and fix — from
- * every other startup failure, which keeps its own error rather than being relabelled.
+ * The one pipeline every server goes through: migrate the template, seed it, install
+ * the Baseline, clone the Worker Databases. When any step fails the server is torn down
+ * before the error propagates — a failed teardown (e.g. the daemon died, failing migrate
+ * and stop alike) must not mask the diagnostic error being thrown.
  */
-async function assertDockerReachable(): Promise<void> {
+async function provision(
+  server: ServerHandle,
+  project: TestProject,
+  seed: CreateGlobalSetupOptions["seed"],
+): Promise<void> {
   try {
-    await getContainerRuntimeClient();
-  } catch (cause) {
-    throw new Error(
-      "The test suite could not reach a container runtime. " +
-        "@flefebvre/prisma-test-helper starts a Postgres container for the run, so " +
-        "Docker must be running — start Docker and run the tests again.",
-      { cause },
-    );
+    migrate(server.templateUrl);
+    if (seed !== undefined) {
+      await runSeed(seed, server.templateUrl);
+      await assertTemplateReleased(server.adminUrl, server.templateName);
+    }
+    await installBaseline(server.templateUrl, server.templateName);
+    await cloneWorkerDatabases(server.adminUrl, server.templateName, workerCount(project));
+  } catch (error) {
+    await server.teardown().catch(() => {});
+    throw error;
   }
 }
 
