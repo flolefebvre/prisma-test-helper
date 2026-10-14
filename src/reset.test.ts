@@ -5,6 +5,7 @@ import {
   buildResetStatement,
   buildVacuumProbe,
   prepareReset,
+  type BaselineTable,
   type DiscoveredRelation,
   type ResetClient,
   type ResetTable,
@@ -186,6 +187,181 @@ describe("buildResetStatement", () => {
   });
 });
 
+// The statements `buildResetStatement` emitted before Baselines existed (origin/release
+// at a113c12), captured from that build, one per shape of the EXECUTE. A project whose
+// migrations insert no rows must get exactly these: that is what "no change in
+// behaviour" means.
+describe("with an empty Baseline", () => {
+  const SET =
+    "BEGIN\n  PERFORM pg_catalog.set_config('session_replication_role', 'replica', true);\n" +
+    "  PERFORM pg_catalog.set_config('lock_timeout', '5s', true);\n";
+  const PROBE_DELETES =
+    "  SELECT string_agg(t.item, ', ') INTO deletes FROM unnest(ARRAY[" +
+    'pg_catalog.to_regclass(\'"public"."Author"\'), pg_catalog.to_regclass(\'"billing"."order"\')], ' +
+    'ARRAY[\'d0 AS (DELETE FROM "public"."Author")\', \'d1 AS (DELETE FROM "billing"."order")\']::text[]) ' +
+    `AS t(rel, item) WHERE ${PROBE};\n`;
+  const SETVALS =
+    'SELECT pg_catalog.setval(\'"public"."Author_id_seq"\'::regclass, 1, false), ' +
+    'pg_catalog.setval(\'"billing"."order_id_seq"\'::regclass, 1000, false)';
+  const sequences = [authorSeq, { schema: "billing", name: "order_id_seq", startValue: "1000" }];
+
+  test.each([
+    [
+      "probed and partitioned tables",
+      [author, order, { ...measurement }],
+      "DO $reset$\nDECLARE deletes text;\n" +
+        SET +
+        PROBE_DELETES +
+        "  EXECUTE 'WITH ' || coalesce(deletes || ', ', '') || $reset_sql$" +
+        `d2 AS (DELETE FROM "public"."measurement") ${SETVALS}$reset_sql$;\nEND\n$reset$`,
+    ],
+    [
+      "probed tables only",
+      [author, order],
+      "DO $reset$\nDECLARE deletes text;\n" +
+        SET +
+        PROBE_DELETES +
+        `  EXECUTE coalesce('WITH ' || deletes || ' ', '') || $reset_sql$${SETVALS}$reset_sql$;\nEND\n$reset$`,
+    ],
+    [
+      "partitioned tables only",
+      [measurement],
+      "DO $reset$\n" +
+        SET +
+        `  EXECUTE $reset_sql$WITH d0 AS (DELETE FROM "public"."measurement") ${SETVALS}$reset_sql$;\n` +
+        "END\n$reset$",
+    ],
+    [
+      "sequences only",
+      [],
+      "DO $reset$\n" + SET + `  EXECUTE $reset_sql$${SETVALS}$reset_sql$;\nEND\n$reset$`,
+    ],
+  ] as const)("is byte-identical to the statement before Baselines — %s", (_, tables, before) => {
+    expect(buildResetStatement(tables, sequences)).toBe(before);
+    expect(buildResetStatement(tables, sequences, [])).toBe(before);
+  });
+});
+
+describe("buildResetStatement with a Baseline", () => {
+  const category: BaselineTable = {
+    schema: "public",
+    name: "Category",
+    relkind: "r",
+    ordinal: 1,
+    columns: ["id", "name"],
+  };
+  const reading: BaselineTable = {
+    schema: "public",
+    name: "Reading",
+    relkind: "p",
+    ordinal: 2,
+    columns: ["id", "at", "value"],
+  };
+  const RESTORE_CATEGORY =
+    'r1d AS (DELETE FROM "public"."Category" RETURNING 1), ' +
+    'r1 AS (INSERT INTO "public"."Category" ("id", "name") OVERRIDING SYSTEM VALUE ' +
+    'SELECT "id", "name" FROM "prisma_test_helper"."t1" WHERE (SELECT count(*) FROM r1d) >= 0)';
+  const RESTORE_READING =
+    'r2d AS (DELETE FROM "public"."Reading" RETURNING 1), ' +
+    'r2 AS (INSERT INTO "public"."Reading" ("id", "at", "value") OVERRIDING SYSTEM VALUE ' +
+    'SELECT "id", "at", "value" FROM "prisma_test_helper"."t2" WHERE (SELECT count(*) FROM r2d) >= 0)';
+
+  test("restores a tracked table only when its dirty mark is set, clearing the marks", () => {
+    const statement = buildResetStatement([], [], [category]);
+
+    expect(statement).toContain("DECLARE restores text;");
+    expect(statement).toContain(
+      '  WITH dirty AS (DELETE FROM "prisma_test_helper"."dirty" RETURNING ordinal) ' +
+        "SELECT string_agg(t.item, ', ') INTO restores FROM unnest(ARRAY[1]::int[], " +
+        `ARRAY[${`'${RESTORE_CATEGORY.replaceAll("'", "''")}'`}]::text[]) AS t(ordinal, item) ` +
+        "WHERE t.ordinal IN (SELECT ordinal FROM dirty);",
+    );
+    expect(statement).toContain(
+      "  EXECUTE coalesce('WITH ' || restores || ' ', '') || $reset_sql$SELECT 1$reset_sql$;",
+    );
+  });
+
+  test("never probes, nor empties outright, a Baseline table", () => {
+    const statement = buildResetStatement([author], [], [category]);
+
+    expect(statement).not.toContain('to_regclass(\'"public"."Category"\')');
+    expect(statement).not.toContain('d1 AS (DELETE FROM "public"."Category")');
+  });
+
+  test("restores a partitioned Baseline table on every Reset, with no dirty mark to read", () => {
+    const statement = buildResetStatement([], [], [reading]);
+
+    expect(statement).toContain(
+      `  EXECUTE $reset_sql$WITH ${RESTORE_READING} SELECT 1$reset_sql$;`,
+    );
+    expect(statement).not.toContain("dirty");
+    expect(statement).not.toContain("DECLARE");
+  });
+
+  test("joins the probed deletes, the tracked restores and the unconditional ones in one EXECUTE", () => {
+    const statement = buildResetStatement([author, measurement], [], [category, reading]);
+
+    expect(statement).toContain("DECLARE deletes text; restores text;");
+    expect(statement).toContain(
+      "  EXECUTE 'WITH ' || coalesce(deletes || ', ', '') || coalesce(restores || ', ', '') || " +
+        `$reset_sql$d1 AS (DELETE FROM "public"."measurement"), ${RESTORE_READING} SELECT 1$reset_sql$;`,
+    );
+    expect(statement.match(/EXECUTE /g)).toHaveLength(1);
+  });
+
+  test("drops the WITH clause when neither a delete nor a restore is kept", () => {
+    expect(buildResetStatement([author], [], [category])).toContain(
+      "  EXECUTE coalesce('WITH ' || nullif(concat_ws(', ', deletes, restores), '') || ' ', '') || " +
+        "$reset_sql$SELECT 1$reset_sql$;",
+    );
+  });
+
+  test("restores a Baseline-owned sequence to its snapshot position, others to their start", () => {
+    const statement = buildResetStatement(
+      [author],
+      [
+        authorSeq,
+        {
+          schema: "public",
+          name: "Category_id_seq",
+          startValue: "1",
+          snapshot: { lastValue: "3", isCalled: true },
+        },
+      ],
+      [category],
+    );
+
+    expect(statement).toContain(
+      'SELECT pg_catalog.setval(\'"public"."Author_id_seq"\'::regclass, 1, false), ' +
+        'pg_catalog.setval(\'"public"."Category_id_seq"\'::regclass, 3, true)$reset_sql$',
+    );
+  });
+
+  test("quotes column names, doubling embedded quotes", () => {
+    const statement = buildResetStatement([], [], [{ ...reading, columns: ['it "odd"'] }]);
+
+    expect(statement).toContain('INSERT INTO "public"."Reading" ("it ""odd""")');
+  });
+
+  test("refuses a column that would close a dollar quote", () => {
+    expect(() => buildResetStatement([], [], [{ ...category, columns: ["a$reset_sql$"] }])).toThrow(
+      "cannot build the Reset: public.Category contains $reset_sql$",
+    );
+  });
+
+  test("refuses a snapshot value or an ordinal that is not an integer", () => {
+    expect(() =>
+      buildResetStatement(
+        [],
+        [{ ...authorSeq, snapshot: { lastValue: "1; DROP TABLE x", isCalled: true } }],
+      ),
+    ).toThrow("has snapshot value 1; DROP TABLE x");
+    expect(() => buildResetStatement([], [], [{ ...category, ordinal: 1.5 }])).toThrow(
+      "has ordinal 1.5",
+    );
+  });
+});
+
 describe("buildVacuumProbe", () => {
   test("lists the quoted name of each ordinary table whose heap file is not empty", () => {
     const probe = buildVacuumProbe([author, measurement, order]);
@@ -300,6 +476,69 @@ describe("prepareReset", () => {
     await expect(reset()).rejects.toThrow(
       /^the Reset could not empty prisma_test_1: canceling statement due to lock timeout\n/,
     );
+  });
+
+  describe("with a Baseline", () => {
+    const withBaseline: DiscoveredRelation[] = [
+      ...discovered,
+      {
+        kind: "table",
+        schema: "public",
+        name: "Category",
+        relkind: "r",
+        start_value: null,
+        ordinal: 1,
+        columns: ["id", "name"],
+      },
+      {
+        kind: "sequence",
+        schema: "public",
+        name: "Category_id_seq",
+        relkind: "S",
+        start_value: "1",
+        last_value: "3",
+        is_called: true,
+      },
+    ];
+    const category: BaselineTable = {
+      schema: "public",
+      name: "Category",
+      relkind: "r",
+      ordinal: 1,
+      columns: ["id", "name"],
+    };
+
+    test("restores the catalog's tables and empties the rest", async () => {
+      const { client, executed } = stubClient("prisma_test_1", withBaseline);
+
+      const { reset } = await prepareReset(client, WORKER_URL, "prisma_test");
+      await reset();
+
+      expect(executed).toEqual([
+        buildResetStatement(
+          [author, measurement],
+          [
+            { schema: "public", name: "Author_id_seq", startValue: "7" },
+            {
+              schema: "public",
+              name: "Category_id_seq",
+              startValue: "1",
+              snapshot: { lastValue: "3", isCalled: true },
+            },
+          ],
+          [category],
+        ),
+      ]);
+    });
+
+    test("leaves Baseline tables out of the vacuum probe", async () => {
+      const { client, queries } = stubClient("prisma_test_1", withBaseline);
+
+      const { vacuum } = await prepareReset(client, WORKER_URL, "prisma_test");
+      await vacuum();
+
+      expect(queries.at(-1)).toBe(buildVacuumProbe([author, measurement]));
+    });
   });
 
   describe("vacuum", () => {

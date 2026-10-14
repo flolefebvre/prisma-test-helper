@@ -8,9 +8,13 @@
 // VACUUM runs between files, and the numbers behind all three: docs/adr/0001.
 
 import {
+  CATALOG,
+  DIRTY as DIRTY_MARKS,
   literal,
   OWNED_SEQUENCES_CTE,
   quoted,
+  SEQUENCE_CATALOG,
+  snapshotCopy,
   TABLES_CTE,
   type QualifiedName,
 } from "./baseline.js";
@@ -55,28 +59,36 @@ export function assertWorkerDatabase(url: string, templateName: string): string 
 }
 
 /**
- * Every table the Reset empties, and every sequence it rewinds — one row per relation,
- * `kind` telling them apart.
+ * Every table the Reset empties or restores, and every sequence it rewinds — one row per
+ * relation, `kind` telling them apart.
  *
- * Tables: ordinary and partitioned (`relkind` `r`, `p`, carried in the row) in every
- * schema but the system ones, minus Prisma's own `_prisma_migrations`. Also left out:
- * partitions, because a DELETE on their partitioned parent already reaches them;
- * temporary tables, which belong to other sessions; and tables an extension owns
- * (PostGIS's `spatial_ref_sys`), which hold reference data the migrations never wrote.
+ * Tables: those of the shared `TABLES_CTE` (`./baseline.js`) — ordinary and partitioned
+ * (`relkind` `r`, `p`, carried in the row) in every schema but the system ones and the
+ * harness's own `prisma_test_helper`, minus Prisma's own `_prisma_migrations`. Also left
+ * out: partitions, because their partitioned parent already reaches them; temporary
+ * tables, which belong to other sessions; and tables an extension owns (PostGIS's
+ * `spatial_ref_sys`), which hold reference data the migrations never wrote. A table the
+ * harness catalog lists is a **Baseline table** — it held rows after migrate — and comes
+ * with its `ordinal` and the `columns` its restore writes; the Reset restores it from its
+ * snapshot instead of emptying it. Every other table is emptied.
  *
  * Sequences: those owned by a column of a discovered table — `serial` columns
  * (`pg_depend` type `a`) and identity columns (type `i`) — each with the `start_value`
  * the Reset rewinds it to, carried as text so no driver turns an `int8` into a `bigint`
- * or a `number` on its own terms. A standalone sequence no column owns is left alone:
- * nothing ties it to a table the Reset empties, and its value may be meant to outlive a
- * test.
+ * or a `number` on its own terms. One a Baseline table owns also carries its snapshot
+ * position, `last_value` and `is_called`, which the Reset restores instead. A
+ * standalone sequence no column owns is left alone: nothing ties it to a table the Reset
+ * empties, and its value may be meant to outlive a test.
  */
 export const DISCOVERY_QUERY = `
 WITH ${TABLES_CTE},
 ${OWNED_SEQUENCES_CTE}
-SELECT 'table' AS kind, schema, name, relkind, NULL::text AS start_value FROM tables
+SELECT 'table' AS kind, t.schema, t.name, t.relkind, NULL::text AS start_value,
+  b.ordinal, b.columns, NULL::text AS last_value, NULL::boolean AS is_called
+FROM tables t LEFT JOIN ${CATALOG} b ON b.schema = t.schema AND b.name = t.name
 UNION ALL
-SELECT 'sequence', schema, name, 'S', start_value FROM sequences
+SELECT 'sequence', s.schema, s.name, 'S', s.start_value, NULL, NULL, p.last_value::text, p.is_called
+FROM sequences s LEFT JOIN ${SEQUENCE_CATALOG} p ON p.schema = s.schema AND p.name = s.name
 ORDER BY 1, 2, 3`;
 
 /** One row of {@link DISCOVERY_QUERY}. */
@@ -86,17 +98,39 @@ export interface DiscoveredRelation extends QualifiedName {
   relkind: "r" | "p" | "S";
   /** The sequence's `start_value`, as decimal text; `null` for a table. */
   start_value: string | null;
+  /** A Baseline table's ordinal in the harness catalog; `null` for any other relation. */
+  ordinal?: number | null;
+  /** The columns a Baseline table's restore writes, in order; `null` otherwise. */
+  columns?: string[] | null;
+  /** A Baseline-owned sequence's snapshot `last_value`, as decimal text; `null` otherwise. */
+  last_value?: string | null;
+  /** A Baseline-owned sequence's snapshot `is_called`; `null` otherwise. */
+  is_called?: boolean | null;
 }
 
 /** A sequence the Reset rewinds: where it is, and the value it goes back to. */
 export interface OwnedSequence extends QualifiedName {
   /** `pg_sequences.start_value`, as decimal text. */
   startValue: string;
+  /**
+   * For a sequence a Baseline table owns: its position at snapshot time, which the Reset
+   * restores with `setval(…, lastValue, isCalled)` instead of rewinding to `startValue`.
+   */
+  snapshot?: { lastValue: string; isCalled: boolean };
 }
 
 /** A table the Reset empties: where it is, and whether it is partitioned (`relkind` `p`). */
 export interface ResetTable extends QualifiedName {
   relkind: "r" | "p";
+}
+
+/**
+ * A Baseline table the Reset restores from its snapshot copy: its catalog `ordinal`, and
+ * the `columns` the restore writes (no generated or dropped ones), unquoted.
+ */
+export interface BaselineTable extends ResetTable {
+  ordinal: number;
+  columns: readonly string[];
 }
 
 // How long the Reset waits on a lock before failing. A test that leaves a lock behind —
@@ -137,8 +171,30 @@ function dirtyItems(tables: readonly QualifiedName[], items: readonly string[]):
 }
 
 /**
+ * The pair of data-modifying CTEs that restores one Baseline table from its snapshot
+ * copy: `r<ordinal>d` deletes the table's rows, and `r<ordinal>` inserts the copy's.
+ * CTEs of one statement run in no fixed order, so the insert reads the delete's count in
+ * an initplan — evaluated once, before its first row — which finishes the delete first:
+ * no restored key ever meets a live old one. `OVERRIDING SYSTEM VALUE` writes the
+ * snapshot's values into `GENERATED ALWAYS` identity columns; on a table with none it
+ * is a no-op. Generated and dropped columns are not in `columns`.
+ */
+function restoreCtes(table: BaselineTable): string {
+  const source = quoted(table);
+  const columns = table.columns.map((column) => `"${column.replaceAll('"', '""')}"`).join(", ");
+  const list = columns === "" ? "" : ` (${columns})`;
+  const name = `r${table.ordinal}`;
+  return (
+    `${name}d AS (DELETE FROM ${source} RETURNING 1), ` +
+    `${name} AS (INSERT INTO ${source}${list} OVERRIDING SYSTEM VALUE ` +
+    `SELECT ${columns} FROM ${snapshotCopy(table.ordinal)} WHERE (SELECT count(*) FROM ${name}d) >= 0)`
+  );
+}
+
+/**
  * Build the Reset statement: one PL/pgSQL `DO` block, sent in one round trip, that
- * empties every table and rewinds every owned sequence.
+ * empties every table, restores the Baseline tables a test wrote to, and rewinds every
+ * owned sequence.
  *
  * - `session_replication_role = replica` switches off foreign-key triggers for the
  *   block, so tables are emptied in any order without cascades.
@@ -150,11 +206,21 @@ function dirtyItems(tables: readonly QualifiedName[], items: readonly string[]):
  *   is measured in amendment 2 of docs/adr/0001. Partitioned parents have no file of
  *   their own and their partitions are not candidates, so their `DELETE` is never
  *   probed.
+ * - **Baseline tables** (`baseline`, read from the harness catalog) are never emptied
+ *   and never probed: their heaps hold rows by design. A second query reads, and
+ *   clears, the dirty marks their triggers left, and keeps the restore CTEs of the
+ *   tables marked (see {@link restoreCtes}). `replica` silences those triggers, so a
+ *   restore marks nothing dirty again. Partitioned Baseline tables have no trigger and
+ *   are restored every time. Design and numbers: docs/adr/0002-baseline-restore.md.
  * - The rest is **one SQL statement**, run with a single `EXECUTE`: the kept `DELETE`s
- *   and a final `SELECT` that calls `setval(…, start_value, false)` on every sequence.
- *   Sequences are always rewound: a failed insert advances one and leaves its table's
- *   file empty. One statement is planned once, which keeps the cost flat in the number
- *   of tables (amendment 1).
+ *   and restores, and a final `SELECT` that calls `setval(…, start_value, false)` on
+ *   every sequence — or, for one a Baseline table owns, `setval(…, last_value,
+ *   is_called)` from the snapshot. Sequences are always rewound: a failed insert
+ *   advances one and leaves its table's file empty, and its dirty mark rolled back. One
+ *   statement is planned once, which keeps the cost flat in the number of tables
+ *   (amendment 1).
+ * - With an empty Baseline the statement is byte for byte the one before Baselines
+ *   existed.
  * - Both settings are transaction-local, so they end with the statement.
  *
  * Identifiers are quoted here, by {@link quoted}, so mixed-case, reserved-word, and
@@ -166,22 +232,38 @@ function dirtyItems(tables: readonly QualifiedName[], items: readonly string[]):
 export function buildResetStatement(
   tables: readonly ResetTable[],
   sequences: readonly OwnedSequence[],
+  baseline: readonly BaselineTable[] = [],
 ): string {
-  for (const { schema, name, startValue } of sequences) {
+  for (const { schema, name, startValue, snapshot } of sequences) {
     if (!/^-?\d+$/.test(startValue)) {
       throw new Error(`cannot build the Reset: ${schema}.${name} has start value ${startValue}`);
+    }
+    if (snapshot !== undefined && !/^-?\d+$/.test(snapshot.lastValue)) {
+      throw new Error(
+        `cannot build the Reset: ${schema}.${name} has snapshot value ${snapshot.lastValue}`,
+      );
+    }
+  }
+  for (const { schema, name, ordinal } of baseline) {
+    if (!Number.isSafeInteger(ordinal) || ordinal < 1) {
+      throw new Error(`cannot build the Reset: ${schema}.${name} has ordinal ${ordinal}`);
     }
   }
   const deletes = tables.map((relation, index) => ({
     relation,
     sql: `d${index} AS (DELETE FROM ${quoted(relation)})`,
   }));
+  const restores = baseline.map((relation) => ({ relation, sql: restoreCtes(relation) }));
   const rewinds = sequences.map((relation) => ({
     relation,
-    sql: `pg_catalog.setval(${literal(quoted(relation))}::regclass, ${relation.startValue}, false)`,
+    sql:
+      relation.snapshot === undefined
+        ? `pg_catalog.setval(${literal(quoted(relation))}::regclass, ${relation.startValue}, false)`
+        : `pg_catalog.setval(${literal(quoted(relation))}::regclass, ` +
+          `${relation.snapshot.lastValue}, ${relation.snapshot.isCalled})`,
   }));
   // Every fragment lands inside both dollar quotes, so none may contain either tag.
-  for (const { relation, sql } of [...deletes, ...rewinds]) {
+  for (const { relation, sql } of [...deletes, ...restores, ...rewinds]) {
     for (const tag of [BLOCK_TAG, SQL_TAG]) {
       if (sql.includes(tag)) {
         throw new Error(
@@ -192,27 +274,62 @@ export function buildResetStatement(
   }
 
   const probed = deletes.filter(({ relation }) => relation.relkind !== "p");
-  const always = deletes.filter(({ relation }) => relation.relkind === "p").map(({ sql }) => sql);
+  // Partitioned Baseline tables have no trigger — a write aimed straight at a partition
+  // never fires the parent's — so they are restored on every Reset, like the partitioned
+  // tables that are emptied, which have no file to probe.
+  const tracked = restores.filter(({ relation }) => relation.relkind !== "p");
+  const always = [...deletes, ...restores]
+    .filter(({ relation }) => relation.relkind === "p")
+    .map(({ sql }) => sql);
   const select = `SELECT ${rewinds.length > 0 ? rewinds.map(({ sql }) => sql).join(", ") : "1"}`;
 
-  const lines = [`DO ${BLOCK_TAG}`];
-  if (probed.length > 0) lines.push("DECLARE deletes text;");
-  lines.push(
-    "BEGIN",
-    "  PERFORM pg_catalog.set_config('session_replication_role', 'replica', true);",
-    `  PERFORM pg_catalog.set_config('lock_timeout', '${LOCK_TIMEOUT}', true);`,
-  );
+  // Each kept fragment is aggregated into a variable by one query, before the EXECUTE.
+  const gathered: { variable: string; query: string }[] = [];
   if (probed.length > 0) {
     const items = dirtyItems(
       probed.map(({ relation }) => relation),
       probed.map(({ sql }) => sql),
     );
-    lines.push(`  SELECT string_agg(t.item, ', ') INTO deletes ${items};`);
-    // `deletes` is NULL when nothing is dirty, and so is any concatenation with it.
-    const head =
-      always.length > 0
-        ? "'WITH ' || coalesce(deletes || ', ', '')"
-        : "coalesce('WITH ' || deletes || ' ', '')";
+    gathered.push({
+      variable: "deletes",
+      query: `SELECT string_agg(t.item, ', ') INTO deletes ${items};`,
+    });
+  }
+  if (tracked.length > 0) {
+    // Reads and clears the dirty marks at once. The DO block is one transaction, so the
+    // marks are gone only if the restores they select commit with them.
+    const ordinals = tracked.map(({ relation }) => relation.ordinal).join(", ");
+    const items = tracked.map(({ sql }) => literal(sql)).join(", ");
+    gathered.push({
+      variable: "restores",
+      query:
+        `WITH dirty AS (DELETE FROM ${DIRTY_MARKS} RETURNING ordinal) ` +
+        `SELECT string_agg(t.item, ', ') INTO restores FROM unnest(ARRAY[${ordinals}]::int[], ` +
+        `ARRAY[${items}]::text[]) AS t(ordinal, item) ` +
+        "WHERE t.ordinal IN (SELECT ordinal FROM dirty);",
+    });
+  }
+  const variables = gathered.map(({ variable }) => variable);
+
+  const lines = [`DO ${BLOCK_TAG}`];
+  if (variables.length > 0) lines.push(`DECLARE ${variables.map((v) => `${v} text;`).join(" ")}`);
+  lines.push(
+    "BEGIN",
+    "  PERFORM pg_catalog.set_config('session_replication_role', 'replica', true);",
+    `  PERFORM pg_catalog.set_config('lock_timeout', '${LOCK_TIMEOUT}', true);`,
+  );
+  for (const { query } of gathered) lines.push(`  ${query}`);
+  if (variables.length > 0) {
+    // A variable is NULL when nothing it covers is kept, and so is any concatenation
+    // with it.
+    let head: string;
+    if (always.length > 0) {
+      head = `'WITH ' || ${variables.map((v) => `coalesce(${v} || ', ', '')`).join(" || ")}`;
+    } else if (variables.length === 1) {
+      head = `coalesce('WITH ' || ${variables[0]} || ' ', '')`;
+    } else {
+      head = `coalesce('WITH ' || nullif(concat_ws(', ', ${variables.join(", ")}), '') || ' ', '')`;
+    }
     const tail = always.length > 0 ? `${always.join(", ")} ${select}` : select;
     lines.push(`  EXECUTE ${head} || ${SQL_TAG}${tail}${SQL_TAG};`);
   } else if (always.length > 0 || rewinds.length > 0) {
@@ -287,19 +404,25 @@ export async function prepareReset(
   }
 
   const relations = (await db.$queryRawUnsafe(DISCOVERY_QUERY)) as DiscoveredRelation[];
-  const tables = relations
-    .filter((relation) => relation.kind === "table")
-    .map(({ schema, name, relkind }): ResetTable => ({
-      schema,
-      name,
-      relkind: relkind === "p" ? "p" : "r",
-    }));
-  const statement = buildResetStatement(
-    tables,
-    relations
-      .filter((relation) => relation.kind === "sequence")
-      .map(({ schema, name, start_value }) => ({ schema, name, startValue: start_value ?? "1" })),
-  );
+  const tables: ResetTable[] = [];
+  const baseline: BaselineTable[] = [];
+  for (const { kind, schema, name, relkind, ordinal, columns } of relations) {
+    if (kind !== "table") continue;
+    const table: ResetTable = { schema, name, relkind: relkind === "p" ? "p" : "r" };
+    if (ordinal === null || ordinal === undefined) tables.push(table);
+    else baseline.push({ ...table, ordinal: Number(ordinal), columns: columns ?? [] });
+  }
+  const sequences = relations
+    .filter((relation) => relation.kind === "sequence")
+    .map(({ schema, name, start_value, last_value, is_called }): OwnedSequence => {
+      const sequence = { schema, name, startValue: start_value ?? "1" };
+      return last_value === null || last_value === undefined
+        ? sequence
+        : { ...sequence, snapshot: { lastValue: last_value, isCalled: is_called === true } };
+    });
+  const statement = buildResetStatement(tables, sequences, baseline);
+  // Baseline tables stay out: their heaps are never empty, so they would always look
+  // dirty to the probe.
   const vacuumProbe = buildVacuumProbe(tables);
 
   return {
