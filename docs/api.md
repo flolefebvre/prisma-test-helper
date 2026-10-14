@@ -32,8 +32,9 @@ Prisma client your app uses. It registers:
   the next file's Resets stay cheap. That `VACUUM` is best effort: it never fails the
   file.
 
-The Reset empties every table but the Baseline tables, the ones your migrations left
-rows in, which it restores when a test wrote to them: see
+The Reset empties every table but the Baseline tables, the ones your migrations or the
+global-setup [`seed`](#the-seed-option) left rows in, which it restores when a test wrote
+to them: see
 [Rows your migrations insert](writing-tests.md#rows-your-migrations-insert).
 
 It refuses, synchronously and before registering anything, unless `DATABASE_URL` names a
@@ -102,13 +103,66 @@ Builds the Vitest global setup that owns the container and the Template Database
 `export default createGlobalSetup()` from the file your `globalSetup` config points at. It
 runs once per test run, in the main process, before any worker is forked. It starts one
 throwaway Postgres, migrates the Template Database with your project's own
-`prisma migrate deploy`, clones one Worker Database per Vitest worker slot, and removes
-the container when the run ends.
+`prisma migrate deploy`, runs your `seed` if you gave one, clones one Worker Database per
+Vitest worker slot, and removes the container when the run ends.
 
-| Option         | Default              | What it does                                                                                                                                       |
-| -------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `image`        | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on. |
-| `databaseName` | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                               |
+| Option         | Default              | What it does                                                                                                                                                                                        |
+| -------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image`        | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on.                                                  |
+| `databaseName` | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                                                                                |
+| `seed`         | none                 | Your project's own seed function, run once per run on the Template Database, after migrate and before cloning. Every table it fills is a Baseline table: see [The `seed` option](#the-seed-option). |
+
+### The `seed` option
+
+```ts
+seed?: (databaseUrl: string) => void | Promise<void>;
+```
+
+Feeds the [Baseline](writing-tests.md#rows-your-migrations-insert) with the reference data
+your project already seeds outside tests: plans, roles, countries. The harness calls it
+once per run, in the main process, after `prisma migrate deploy` and before the Baseline
+snapshot and the cloning of Worker Databases. `databaseUrl` is the connection URI of the
+Template Database. Build your own client from it, call the same function your real seed
+calls, and disconnect:
+
+```ts
+// tests/global-setup.ts
+import { PrismaPg } from "@prisma/adapter-pg";
+
+import { createGlobalSetup } from "@flefebvre/prisma-test-helper/global-setup";
+import { PrismaClient } from "../src/generated/prisma/client.js";
+import { seedReferenceData } from "../prisma/seed-reference-data.js";
+
+export default createGlobalSetup({
+  seed: async (databaseUrl) => {
+    const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+    try {
+      await seedReferenceData(db); // the same function your real seed calls
+    } finally {
+      await db.$disconnect();
+    }
+  },
+});
+```
+
+- **Every table the seed fills is a Baseline table.** Its rows are there at the start of
+  every test and restored after any test that writes them, and its ids continue from the
+  seed's last row.
+- **Disconnect before returning.** The template cannot be cloned while anything is
+  connected to it. If a session is still connected about two seconds after the seed
+  returns, the run fails with `the seed left a connection open to the Template Database`.
+- **Do not import your app's client module here.** This file runs in the main process,
+  before any worker has a `DATABASE_URL`; a client module that reads it at import time
+  throws, or points at your dev database.
+- **A seed that throws fails the run** with `the seed failed:` and your error as `cause`.
+  The container is stopped. The seed's output is not captured.
+- **Seed reference data, not demo data.** The harness does not run `prisma db seed`. A
+  seed that also creates demo rows, such as an admin user, makes their tables Baseline
+  tables too, and every test that writes one of them pays that table's restore. Call your
+  full seed script from this function only if every test should start with those rows.
+
+This `seed` is unrelated to the Reset Hook's `seed`, the per-test number a
+[Reset Hook](#registerresethookhook) receives.
 
 ### Typed `inject`
 
@@ -179,6 +233,7 @@ it was cloned from.
 interface CreateGlobalSetupOptions {
   image?: string;
   databaseName?: string;
+  seed?: (databaseUrl: string) => void | Promise<void>;
 }
 ```
 

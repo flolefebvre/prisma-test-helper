@@ -39,7 +39,9 @@ test("starts from a clean database — the author above is gone", async () => {
 - **No cleanup code.** Every test starts from an empty database with its sequences
   rewound — no truncation of your own, no ordering constraints, no leftover rows. Rows
   your migrations insert, such as lookup tables, are the exception: every test starts
-  with them, restored after any test that changed them.
+  with them, restored after any test that changed them. So are the rows of the
+  reference-data seed you can hand global setup: your project's own seed function, not
+  `prisma db seed`.
 - **Real commits.** Nothing is wrapped or faked: `$transaction` behaves as in production,
   and a second client, a queue worker, or a deferred constraint sees exactly what it
   would there.
@@ -60,8 +62,8 @@ One run of your test suite goes through this lifecycle:
 1. Vitest's global setup starts one tuned throwaway Postgres container (tmpfs data
    directory, `fsync=off`) through [Testcontainers](https://testcontainers.com/).
 2. Your project's own `prisma migrate deploy` runs once against a **Template Database**
-   inside that container. The tables it leaves rows in form the **Baseline**, which the
-   harness snapshots there.
+   inside that container, followed by your own seed function if you configured one. The
+   tables they leave rows in form the **Baseline**, which the harness snapshots there.
 3. Before any worker forks, one **Worker Database** per Vitest worker slot is cloned from
    the template (`<databaseName>_1..N`) with `CREATE DATABASE … TEMPLATE` — a fast
    file-level copy.
