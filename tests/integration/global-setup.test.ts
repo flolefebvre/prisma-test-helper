@@ -1,22 +1,16 @@
-import { PrismaPg } from "@prisma/adapter-pg";
-import { expect, inject, onTestFinished, test } from "vitest";
+import { expect, inject, test } from "vitest";
 
-import { PrismaClient } from "../generated/prisma/client.js";
+import { templateClient } from "../db/template.js";
 
-// These tests run against the container the repo's own globalSetup file
-// (tests/global-setup.ts) started with the documented defaults, plus one
-// `postgresSettings` entry (`log_checkpoints: false`): Template Database
-// `prisma_test`, migrated with the fixture schema, cloned into `prisma_test_1..2`
-// (the integration project pins maxWorkers to 2).
-
-function clientFor(uri: string): PrismaClient {
-  const client = new PrismaClient({ adapter: new PrismaPg({ connectionString: uri }) });
-  onTestFinished(() => client.$disconnect());
-  return client;
-}
+// These tests run in both integration projects: against the container the repo's own
+// globalSetup file (tests/global-setup.ts) started, and against the existing server the
+// url project's (tests/global-setup-url.ts) points at. Either way the Template Database
+// is migrated with the fixture schema, seeded, and cloned into `<template>_1..2` (both
+// projects pin maxWorkers to 2). What only one mode guarantees lives in
+// container.test.ts and tests/url-mode/.
 
 test("migrates the fixture schema into the Template Database", async () => {
-  const template = clientFor(inject("templateDatabaseUri"));
+  const template = templateClient();
 
   // The count queries fail unless `prisma migrate deploy` created the tables.
   await expect(template.author.count()).resolves.toBe(0);
@@ -24,7 +18,7 @@ test("migrates the fixture schema into the Template Database", async () => {
 });
 
 test("snapshots the template's non-empty tables into the harness schema", async () => {
-  const template = clientFor(inject("templateDatabaseUri"));
+  const template = templateClient();
 
   // `Category` and `Reading` hold the rows the fixture's migrations insert, `Tag` the rows
   // the seed inserts; `Author` and `Post` are empty, so they stay out of the Baseline.
@@ -47,7 +41,7 @@ test("snapshots the template's non-empty tables into the harness schema", async 
 });
 
 test("runs the seed on the Template Database, before the Worker Databases are cloned", async () => {
-  const template = clientFor(inject("templateDatabaseUri"));
+  const template = templateClient();
 
   // The rows are in the template, and the clones, made after the seed, inherit them —
   // seed.test.ts reads them in a Worker Database.
@@ -58,31 +52,13 @@ test("runs the seed on the Template Database, before the Worker Databases are cl
 });
 
 test("provisions one Worker Database per worker slot", async () => {
-  const template = clientFor(inject("templateDatabaseUri"));
+  const name = inject("templateDatabaseName");
+  const template = templateClient();
 
-  const rows = await template.$queryRaw<
-    { datname: string }[]
-  >`SELECT datname FROM pg_database WHERE datname LIKE 'prisma_test_%' ORDER BY datname`;
+  const rows = await template.$queryRawUnsafe<{ datname: string }[]>(
+    "SELECT datname FROM pg_database WHERE datname ~ $1 ORDER BY datname",
+    `^${name}_[0-9]+$`,
+  );
 
-  expect(rows.map((row) => row.datname)).toEqual(["prisma_test_1", "prisma_test_2"]);
-});
-
-test("starts the server with postgresSettings applied over the built-in defaults", async () => {
-  const template = clientFor(inject("templateDatabaseUri"));
-  const show = async (name: string) => {
-    const [row] = await template.$queryRawUnsafe<Record<string, string>[]>(`SHOW ${name}`);
-    return row?.[name];
-  };
-
-  expect(await show("log_checkpoints")).toBe("off");
-  // The override merge keeps every default the settings did not name.
-  expect(await show("fsync")).toBe("off");
-  expect(await show("synchronous_commit")).toBe("off");
-  expect(await show("full_page_writes")).toBe("off");
-});
-
-test("provides the Template Database name alongside the URI", () => {
-  // The name has to cross the process boundary too: the worker rewrites the URI path
-  // from it, and the Worker Database guard derives its accepted shape from it.
-  expect(inject("templateDatabaseName")).toBe("prisma_test");
+  expect(rows.map((row) => row.datname)).toEqual([`${name}_1`, `${name}_2`]);
 });

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, inject, test } from "vitest";
 
 import { DISCOVERY_QUERY, prepareReset, type DiscoveredRelation } from "../../src/reset.js";
 import { db } from "../db/client.js";
@@ -76,7 +76,11 @@ test("the Reset empties every discovered table and rewinds every owned sequence"
   await query(`SELECT nextval('${SCHEMA}.standalone')`);
 
   // Act
-  const { reset } = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
+  const { reset } = await prepareReset(
+    db,
+    process.env.DATABASE_URL!,
+    inject("templateDatabaseName"),
+  );
   await reset();
 
   // Assert: empty, partitions included, and the next ids start over.

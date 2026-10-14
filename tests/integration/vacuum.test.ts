@@ -1,5 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { beforeAll, expect, test } from "vitest";
+import { beforeAll, expect, inject, test } from "vitest";
 
 import { setupDatabase } from "../../src/index.js";
 import { prepareReset, type PreparedReset } from "../../src/reset.js";
@@ -22,7 +22,7 @@ const freshClient = () => new PrismaClient({ adapter: new PrismaPg({ connectionS
 let prepared: PreparedReset;
 
 beforeAll(async () => {
-  prepared = await prepareReset(db, url(), "prisma_test");
+  prepared = await prepareReset(db, url(), inject("templateDatabaseName"));
 });
 
 /** The heap size, in bytes, of each fixture table. */
@@ -40,7 +40,7 @@ test("a Reset from a fresh backend still empties a table written earlier", async
 
   try {
     // Act: the Reset, probing from a backend that has opened neither table.
-    const { reset } = await prepareReset(fresh, url(), "prisma_test");
+    const { reset } = await prepareReset(fresh, url(), inject("templateDatabaseName"));
     await reset();
   } finally {
     await fresh.$disconnect();
