@@ -1,9 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 
 import {
   assertWorkerDatabase,
   buildResetStatement,
   buildVacuumProbe,
+  clearResetCache,
+  DISCOVERY_QUERY,
   prepareReset,
   type BaselineTable,
   type DiscoveredRelation,
@@ -413,6 +415,12 @@ describe("buildVacuumProbe", () => {
 });
 
 describe("prepareReset", () => {
+  // Discovery is cached per Worker Database URL for the module's life, and every test
+  // here uses the same URL with a different schema: each starts from an empty cache.
+  beforeEach(() => {
+    clearResetCache();
+  });
+
   /**
    * A client whose raw reads answer like Postgres would — the guard's check, discovery,
    * and the vacuum probe, which reports `dirty` — recording every raw query and write.
@@ -608,6 +616,89 @@ describe("prepareReset", () => {
       const { vacuum } = await prepareReset(client, WORKER_URL, "prisma_test");
 
       await expect(vacuum()).resolves.toBeUndefined();
+    });
+  });
+
+  // Under `isolate: false` one module serves every file on a worker: a later file's
+  // `prepareReset` finds the first file's discovery cached.
+  describe("across files on one worker", () => {
+    const GUARD = "SELECT current_database()::text AS name";
+
+    test("discovers once per Worker Database, and guards every call", async () => {
+      const first = stubClient("prisma_test_1", discovered);
+      const second = stubClient("prisma_test_1", discovered);
+
+      await prepareReset(first.client, WORKER_URL, "prisma_test");
+      await prepareReset(second.client, WORKER_URL, "prisma_test");
+
+      expect(first.queries).toEqual([GUARD, DISCOVERY_QUERY]);
+      expect(second.queries).toEqual([GUARD]);
+    });
+
+    test("still refuses a later file's client connected elsewhere", async () => {
+      await prepareReset(stubClient("prisma_test_1", discovered).client, WORKER_URL, "prisma_test");
+
+      await expect(
+        prepareReset(stubClient("myapp").client, WORKER_URL, "prisma_test"),
+      ).rejects.toThrow("is connected to myapp");
+    });
+
+    test("runs each file's Reset and VACUUM through the client that file passed", async () => {
+      const first = stubClient("prisma_test_1", discovered);
+      const second = stubClient("prisma_test_1", discovered, [{ name: '"public"."Author"' }]);
+      const { reset: firstReset } = await prepareReset(first.client, WORKER_URL, "prisma_test");
+      await firstReset();
+
+      const { reset, vacuum } = await prepareReset(second.client, WORKER_URL, "prisma_test");
+      await reset();
+      await vacuum();
+
+      expect(first.executed).toHaveLength(1);
+      expect(second.executed).toEqual([
+        first.executed[0],
+        'VACUUM (SKIP_LOCKED) "public"."Author"',
+      ]);
+    });
+
+    test("discovers each Worker Database on its own", async () => {
+      await prepareReset(stubClient("prisma_test_1", discovered).client, WORKER_URL, "prisma_test");
+      const other = stubClient("prisma_test_2", [discovered[0]!]);
+
+      const { reset } = await prepareReset(
+        other.client,
+        "postgresql://u:p@localhost:5432/prisma_test_2",
+        "prisma_test",
+      );
+      await reset();
+
+      expect(other.queries).toEqual([GUARD, DISCOVERY_QUERY]);
+      expect(other.executed).toEqual([buildResetStatement([author], [])]);
+    });
+
+    test("keeps no failed discovery: the next file discovers again", async () => {
+      const failing = stubClient("prisma_test_1");
+      failing.client.$queryRawUnsafe = async (query: string) => {
+        if (query === GUARD) return [{ name: "prisma_test_1" }];
+        throw new Error("connection reset");
+      };
+      await expect(prepareReset(failing.client, WORKER_URL, "prisma_test")).rejects.toThrow(
+        "connection reset",
+      );
+      const next = stubClient("prisma_test_1", discovered);
+
+      await prepareReset(next.client, WORKER_URL, "prisma_test");
+
+      expect(next.queries).toEqual([GUARD, DISCOVERY_QUERY]);
+    });
+
+    test("discovers again once the cache is cleared", async () => {
+      await prepareReset(stubClient("prisma_test_1", discovered).client, WORKER_URL, "prisma_test");
+      clearResetCache();
+      const next = stubClient("prisma_test_1", discovered);
+
+      await prepareReset(next.client, WORKER_URL, "prisma_test");
+
+      expect(next.queries).toEqual([GUARD, DISCOVERY_QUERY]);
     });
   });
 });

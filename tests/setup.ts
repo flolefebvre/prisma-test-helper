@@ -1,8 +1,9 @@
 import { setupWorkerDatabase } from "../src/setup.js";
 
 // The exact setup file the README prescribes to consumers, pointed at the library source
-// instead of the package name. Registered as `setupFiles` for the integration project, so
-// it re-runs in a fresh fork per test file.
+// instead of the package name. Registered as `setupFiles` for the integration projects, so
+// it re-runs before every test file: in a fresh fork under `isolate: true`, in the
+// worker's kept modules under `isolate: false` (`integration-no-isolate`).
 //
 // `tests/global-setup.ts` started one container for the whole run, migrated the Template
 // Database and cloned one Worker Database per worker slot before any worker was forked.

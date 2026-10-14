@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 
+import { isOptedIn, markOptedIn } from "./opt-in.js";
 import { setupWorkerDatabase } from "./setup.js";
 
 // Everything here runs Docker-free. The pure half, the path rewrite, is
@@ -30,5 +31,15 @@ describe("setupWorkerDatabase", () => {
     expect(() => setupWorkerDatabase()).toThrow(/createGlobalSetup/);
     // The path the docs prescribe, so the error and the docs name the same file.
     expect(() => setupWorkerDatabase()).toThrow('globalSetup: ["tests/global-setup.ts"]');
+  });
+
+  test("begins a test file: the opt-in state of the previous one is gone", () => {
+    // A worker that kept its modules from a file that opted in, as under
+    // `isolate: false`. The call clears it before any of its checks, so even this
+    // half-wired run, which throws, starts the file opted out.
+    markOptedIn();
+
+    expect(() => setupWorkerDatabase()).toThrow(/globalSetup/);
+    expect(isOptedIn()).toBe(false);
   });
 });

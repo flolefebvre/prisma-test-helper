@@ -349,8 +349,8 @@ process.env.PGSSLMODE = "disable";
 ```
 
 Assign rather than delete: a loader like dotenv leaves a variable that is already set
-alone, but would put a deleted one back from your `.env`. The setup file runs in each test
-file's own process, so this touches nothing outside the test run.
+alone, but would put a deleted one back from your `.env`. The setup file runs inside the
+test workers, so this touches nothing outside the test run.
 
 **Done when:** the file calls `setupWorkerDatabase()` first, the only static imports in
 it are library ones, and it sets any variable that turns on TLS to its off value.
@@ -365,8 +365,8 @@ export default defineConfig({
   test: {
     globalSetup: ["tests/global-setup.ts"],
     setupFiles: ["tests/setup.ts"],
-    // Both are Vitest defaults, set explicitly because the harness depends on them:
-    // together they re-run `setupFiles` in a fresh process per test file.
+    // Both are Vitest defaults, set explicitly: `pool: "forks"` is required, and
+    // `isolate: true` gives every test file fresh modules (see "isolate: false" below).
     pool: "forks",
     isolate: true,
   },
@@ -374,14 +374,45 @@ export default defineConfig({
 ```
 
 **A config already exists** → merge, preserving every existing key. Add the four
-settings above, appending to `globalSetup` and `setupFiles` if they already hold entries.
-`tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any
-other setup file loads your app.
+settings above (an `isolate` the config already sets keeps its value), appending to
+`globalSetup` and `setupFiles` if they already hold entries. `tests/setup.ts` must come
+first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads your
+app.
 
-`pool: "forks"` and `isolate: true` are load-bearing. Under `isolate: false` module state
-leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module
-re-instantiating per file. If an existing config sets `pool: "threads"` or
-`isolate: false`, correct them.
+`pool: "forks"` is load-bearing: if an existing config sets `pool: "threads"`, correct it.
+`isolate: true` is the default the harness is documented and tuned for. An existing
+`isolate: false` is supported: keep it if the project chose it, and read the next section.
+
+### `isolate: false`
+
+Under `isolate: false` each worker keeps its modules across the test files it runs: your
+app's import graph is loaded once per worker instead of once per file, and your Prisma
+client and its connection pool are reused. The harness supports it as an opt-in. Every
+file still runs `tests/setup.ts` first and starts from a clean Worker Database, each
+file's `setupDatabase(db)` opt-in belongs to that file alone, and the Reset is built once
+per worker instead of once per file.
+
+What it saves, measured on a generated suite of 73 tables, 8 files per worker of 20 tests,
+and an app import costing about 300 ms: **46 % of the run at 4 workers (12.0 → 6.5 s) and
+35 % at 16 (15.5 → 10.1 s)**. Most of it is the import a file no longer repeats; the
+rest, a first Reset per file on a connection that is already warm. The bigger your import
+graph, the more it saves. Numbers and method:
+[ADR 0001, amendment 3](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
+
+What it costs, all of it Vitest's own behaviour, not the harness's:
+
+- **Module state leaks between files on a worker.** A module-level variable, a cache or a
+  singleton one file changes is what the next file sees. So is a `vi.mock` a file
+  registers: restore mocks in the file that made them, or keep mocked files on
+  `isolate: true` in their own project.
+- **Reset Hooks carry over.** A hook a factory module registers at import is registered
+  once per worker, which is what you want. A hook registered inside one test file's body
+  keeps running for every later file on that worker.
+- **Schema changes outside your migrations are not seen.** The Reset is built from the
+  schema once per worker. A table a test creates is not emptied by later files' Resets on
+  that worker, and a table a test drops makes their Reset fail with
+  `relation … does not exist`. Keep schema changes in migrations, or run such files on
+  `isolate: true`.
 
 ### Projects
 
@@ -428,8 +459,9 @@ export default defineConfig({
 The file path is deliberate: `server-only` exposes only `.` in its `exports` map, so the
 subpath specifier `server-only/empty.js` does not resolve.
 
-**Done when:** a single Vitest config carries all four settings alongside its original
-contents, its paths match the files from steps 3 and 4, and aliased imports resolve.
+**Done when:** a single Vitest config carries all four settings (`isolate` as the project
+had it, `true` otherwise) alongside its original contents, its paths match the files from
+steps 3 and 4, and aliased imports resolve.
 
 ## 6. Prove it works
 

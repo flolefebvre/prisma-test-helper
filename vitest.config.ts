@@ -5,11 +5,9 @@ const integration = {
   environment: "node",
   // Points DATABASE_URL at this worker's Worker Database, once per test file.
   setupFiles: ["tests/setup.ts"],
-  // Both are Vitest defaults, set explicitly because the harness depends on
-  // them: together they re-run `setupFiles` in a fresh process per test file.
-  // Under `isolate: false` module state leaks across files, and the
-  // `setupDatabase(db)` opt-in guard relies on its module re-instantiating per
-  // file — `isDatabaseSetUp()` would report a neighbouring file's opt-in.
+  // Both are Vitest defaults, set explicitly because they are what the docs
+  // prescribe: together they re-run `setupFiles` in a fresh process per test file.
+  // `isolate: false` is the documented opt-in, run by `integration-no-isolate`.
   pool: "forks" as const,
   isolate: true,
   // Pinned so the suite can assert the exact set of Worker Databases — and
@@ -60,6 +58,20 @@ export default defineConfig({
           // extending them: spread them back so a wider `include` stays safe.
           exclude: [...configDefaults.exclude, "tests/integration/container.test.ts"],
           globalSetup: ["tests/global-setup-url.ts"],
+        },
+      },
+      // The container suite again under the `isolate: false` opt-in: each worker keeps
+      // its modules — the Prisma client, its pool, the cached Reset — across the files it
+      // runs, and `setupFiles` still runs before each. Every file must keep its own opt-in
+      // state and start from a clean Worker Database. Which files share a worker is the
+      // pool's choice; src/opt-in.test.ts pins the pairings deterministically. Needs Docker.
+      {
+        test: {
+          ...integration,
+          name: "integration-no-isolate",
+          include: ["tests/integration/**/*.test.ts"],
+          globalSetup: ["tests/global-setup.ts"],
+          isolate: false,
         },
       },
     ],
