@@ -12,6 +12,19 @@ import {
 } from "./baseline.js";
 import { createGlobalSetup } from "./global-setup.js";
 import { postgresCommand } from "./postgres-command.js";
+import {
+  lostLockMessage,
+  MARKED_DATABASES_QUERY,
+  markStatement,
+  runLockKey,
+  runLockStatement,
+  runMarker,
+  runUnlockStatement,
+  SERVER_CHECK_QUERY,
+  sweepFailedMessage,
+  sweptMessage,
+  tryRunLockStatement,
+} from "./server.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
@@ -62,12 +75,14 @@ vi.mock("@testcontainers/postgresql", () => ({
 // query it was sent, and the order connections opened and closed in. `failOn` makes the
 // query matching it reject the way pg does, with Postgres's message; `answers` makes the
 // first query containing a key resolve with those rows (a function answers each such
-// query anew). `connect` makes every connect reject with that message.
+// query anew). `connect` makes every connect reject with that message. `errorListeners`
+// holds each client's `error` listener, so a test can drop a connection the way pg does.
 const pg = vi.hoisted(() => {
   const connections: { connectionString: string; ssl?: unknown }[] = [];
+  const errorListeners: ((error: Error) => void)[] = [];
   const queries: string[] = [];
   const events: string[] = [];
-  const answers = new Map<string, unknown[] | (() => unknown[])>();
+  const answers = new Map<string, unknown[] | ((sql: string) => unknown[])>();
   // `failWith` makes closing a connection to `failFor` reject.
   const ended = {
     count: 0,
@@ -81,6 +96,10 @@ const pg = vi.hoisted(() => {
       connections.push(config);
       this.database = new URL(config.connectionString).pathname.slice(1);
     }
+    on(event: string, listener: (error: Error) => void) {
+      if (event === "error") errorListeners.push(listener);
+      return this;
+    }
     async connect() {
       if (failure.connect !== undefined) throw new Error(failure.connect);
       events.push(`open ${this.database}`);
@@ -91,7 +110,7 @@ const pg = vi.hoisted(() => {
         throw new Error(failure.message);
       }
       for (const [key, rows] of answers) {
-        if (sql.includes(key)) return { rows: typeof rows === "function" ? rows() : rows };
+        if (sql.includes(key)) return { rows: typeof rows === "function" ? rows(sql) : rows };
       }
       return { rows: [] };
     }
@@ -103,7 +122,7 @@ const pg = vi.hoisted(() => {
       }
     }
   }
-  return { Client, connections, queries, events, answers, ended, failure };
+  return { Client, connections, errorListeners, queries, events, answers, ended, failure };
 });
 vi.mock("pg", () => ({ default: { Client: pg.Client } }));
 
@@ -112,6 +131,7 @@ beforeEach(() => {
   postgres.databases.length = 0;
   postgres.commands.length = 0;
   pg.connections.length = 0;
+  pg.errorListeners.length = 0;
   pg.queries.length = 0;
   pg.events.length = 0;
   pg.answers.clear();
@@ -247,6 +267,17 @@ describe("createGlobalSetup", () => {
     await runSetup();
 
     expect(pg.ended.count).toBe(2);
+  });
+
+  // A container dies with its run: nothing on it can outlive the run, so nothing is
+  // marked, locked or swept.
+  test("marks nothing, takes no lock and sweeps nothing", async () => {
+    const { teardown } = await runSetup();
+    await teardown();
+
+    expect(pg.queries.filter((query) => /COMMENT|advisory|shobj_description/.test(query))).toEqual(
+      [],
+    );
   });
 
   describe("the Baseline install", () => {
@@ -746,5 +777,197 @@ describe("createGlobalSetup in url mode", () => {
         'drop them by hand with DROP DATABASE "<name>" WITH (FORCE)',
     );
     expect(drops()).toHaveLength(3);
+  });
+
+  describe("Run markers, the run lock and the Sweep", () => {
+    /** The run id of the run, read back from its template's name. */
+    const runIdOf = (project: TestProject) => providedTemplate(project).slice(-8);
+
+    const DEAD = "0a1b2c3d";
+    const LIVE = "ffffffff";
+    // What the listing returns: a dead run's two databases, a live run's template, and a
+    // database whose comment only starts like a marker.
+    const leftovers = () =>
+      pg.answers.set("shobj_description", [
+        { datname: `prisma_test_${DEAD}`, marker: runMarker(DEAD) },
+        { datname: `prisma_test_${DEAD}_1`, marker: runMarker(DEAD) },
+        { datname: `app_test_${LIVE}`, marker: runMarker(LIVE) },
+        { datname: "prisma_test_0b1b2c3d", marker: `${runMarker("0b1b2c3d")} (kept)` },
+      ]);
+    // Only the dead run's lock is free.
+    const deadRunUnlocked = () =>
+      pg.answers.set("pg_try_advisory_lock", (sql) => [
+        { locked: sql.includes(`, ${runLockKey(DEAD)})`) },
+      ]);
+
+    test("checks the server, takes its own lock, sweeps, then creates and marks the template", async () => {
+      const { project } = await runSetup({ url: SERVER });
+      const template = providedTemplate(project);
+
+      expect(pg.queries.slice(0, 5)).toEqual([
+        SERVER_CHECK_QUERY,
+        runLockStatement(runIdOf(project)),
+        MARKED_DATABASES_QUERY,
+        `CREATE DATABASE "${template}"`,
+        markStatement(template, runIdOf(project)),
+      ]);
+    });
+
+    test("marks every Worker Database right after cloning it", async () => {
+      const { project } = await runSetup({ url: SERVER });
+      const template = providedTemplate(project);
+      const runId = runIdOf(project);
+
+      expect(
+        pg.queries.filter((query) => /^(CREATE DATABASE|COMMENT)/.test(query)).slice(2),
+      ).toEqual([
+        `CREATE DATABASE "${template}_1" TEMPLATE "${template}"`,
+        markStatement(`${template}_1`, runId),
+        `CREATE DATABASE "${template}_2" TEMPLATE "${template}"`,
+        markStatement(`${template}_2`, runId),
+      ]);
+    });
+
+    test("names the Worker Database when marking it fails, and drops what the run derived", async () => {
+      pg.failure.failOn = '_1" IS';
+      pg.failure.message = "must be owner of database";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        /failed at prisma_test_[0-9a-f]{8}_1: must be owner of database/,
+      );
+      expect(drops()).toHaveLength(3);
+    });
+
+    test("drops a dead run's marked databases under its lock, and leaves a live run's alone", async () => {
+      leftovers();
+      deadRunUnlocked();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { project } = await runSetup({ url: SERVER });
+
+      const sweep = pg.queries.slice(
+        pg.queries.indexOf(MARKED_DATABASES_QUERY) + 1,
+        pg.queries.indexOf(`CREATE DATABASE "${providedTemplate(project)}"`),
+      );
+      expect(sweep).toEqual([
+        tryRunLockStatement(DEAD),
+        `DROP DATABASE IF EXISTS "prisma_test_${DEAD}" WITH (FORCE)`,
+        `DROP DATABASE IF EXISTS "prisma_test_${DEAD}_1" WITH (FORCE)`,
+        runUnlockStatement(DEAD),
+        tryRunLockStatement(LIVE),
+      ]);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        sweptMessage(REDACTED, [`prisma_test_${DEAD}`, `prisma_test_${DEAD}_1`]),
+      );
+    });
+
+    test("sweeps silently when no run left anything", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await runSetup({ url: SERVER });
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    test("warns about a leftover it could not drop, and goes on with the run", async () => {
+      leftovers();
+      deadRunUnlocked();
+      pg.failure.failOn = `"prisma_test_${DEAD}_1" WITH`;
+      pg.failure.message = "permission denied";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { project } = await runSetup({ url: SERVER });
+
+      expect(providedTemplate(project)).toMatch(TEMPLATE);
+      expect(pg.queries).toContain(runUnlockStatement(DEAD));
+      expect(warn).toHaveBeenCalledWith(sweptMessage(REDACTED, [`prisma_test_${DEAD}`]));
+      expect(warn).toHaveBeenCalledWith(
+        sweepFailedMessage(REDACTED, [`prisma_test_${DEAD}_1 (permission denied)`]),
+      );
+    });
+
+    test("fails when the listing fails, creating nothing and closing its connection", async () => {
+      pg.failure.failOn = "shobj_description";
+      pg.failure.message = "canceling statement due to statement timeout";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        "canceling statement due to statement timeout",
+      );
+      expect(created()).toEqual([]);
+      expect(drops()).toEqual([]);
+      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+    });
+
+    test("closes its held connection when the server check refuses it", async () => {
+      check({ superuser: false });
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(/is not a superuser/);
+      expect(pg.events).toEqual(["open postgres", "close postgres"]);
+    });
+
+    test("drops the template and closes its held connection when marking the template fails", async () => {
+      pg.failure.failOn = "COMMENT ON";
+      pg.failure.message = "must be owner of database";
+
+      await expect(runSetup({ url: SERVER })).rejects.toThrow(
+        /^could not create the Template Database prisma_test_[0-9a-f]{8} on .*: must be owner/,
+      );
+      expect(drops()).toHaveLength(3);
+      expect(pg.events).toEqual([
+        "open postgres",
+        "open postgres",
+        "close postgres",
+        "close postgres",
+      ]);
+    });
+
+    // The lock must stay held until the run's databases are gone, or a run starting
+    // in between could take this one for dead.
+    test("teardown releases the lock only after the drops: the held connection closes last", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      pg.events.length = 0;
+      pg.answers.set("DROP DATABASE", () => {
+        pg.events.push("drop");
+        return [];
+      });
+
+      await teardown();
+
+      expect(pg.events).toEqual([
+        "open postgres",
+        "drop",
+        "drop",
+        "drop",
+        "close postgres",
+        "close postgres",
+      ]);
+      expect(pg.errorListeners).toHaveLength(4);
+    });
+
+    test("teardown closes the held connection even when a drop fails", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      pg.events.length = 0;
+      pg.failure.failOn = "DROP DATABASE";
+      pg.failure.message = "permission denied";
+
+      await expect(teardown()).rejects.toThrow(/could not drop this run's databases/);
+      expect(pg.events.filter((event) => event.startsWith("close"))).toHaveLength(2);
+    });
+
+    test("warns once when the held connection drops, and teardown does not close it again", async () => {
+      const { teardown } = await runSetup({ url: SERVER });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const held = pg.errorListeners[0]!;
+
+      held(new Error("Connection terminated unexpectedly"));
+      held(new Error("Connection terminated unexpectedly"));
+      pg.events.length = 0;
+      await teardown();
+
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        lostLockMessage(REDACTED, "Connection terminated unexpectedly"),
+      );
+      expect(pg.events.filter((event) => event.startsWith("close"))).toHaveLength(1);
+    });
   });
 });

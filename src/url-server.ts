@@ -3,16 +3,38 @@
 // never collide; the URL the user gave is only connected through, for `CREATE DATABASE` /
 // `DROP DATABASE`, and nothing is ever written into its database. The SQL is built by the
 // pure helpers of `./server.js`; this only sends it.
+//
+// The server outlives the run, so a run killed before its teardown leaves its databases
+// there. Each run therefore holds one admin connection for its whole life, carrying an
+// advisory lock keyed by its run id, and marks every database it creates with a Run
+// marker. At startup the Sweep drops the marked databases of every run whose lock is
+// free — a run whose session is gone — and leaves those of a live run alone.
 
-import { withAdminConnection, type AdminConnection } from "./admin-connection.js";
+import {
+  openAdminConnection,
+  withAdminConnection,
+  type AdminConnection,
+  type HeldAdminConnection,
+} from "./admin-connection.js";
 import {
   assertNamesFit,
   assertServerUsable,
+  dropDatabaseStatement,
   dropStatements,
+  leftoversByRun,
+  lostLockMessage,
+  MARKED_DATABASES_QUERY,
+  markStatement,
   newRunId,
   redactUrl,
+  runLockStatement,
   runTemplateName,
+  runUnlockStatement,
   SERVER_CHECK_QUERY,
+  sweepFailedMessage,
+  sweptMessage,
+  tryRunLockStatement,
+  type MarkedDatabase,
   type ServerCheck,
   type ServerHandle,
   type UrlSource,
@@ -23,13 +45,17 @@ import { databaseUrl } from "./worker-database.js";
  * Open the run on the server at `url`, and hand back its {@link ServerHandle}.
  *
  * Before anything is created: the names are checked against the identifier limit, then
- * one admin round-trip checks the role is a superuser and the server Postgres 13+. Only
- * then is the run's template, `<databaseName>_<run id>`, created — empty, from the
- * server's default template, ready to migrate. The admin URL is `url` itself.
+ * the run opens the admin connection it holds until teardown, and one round-trip on it
+ * checks the role is a superuser and the server Postgres 13+. The run then takes its own
+ * lock, so no other run's Sweep can take it for dead, and sweeps the server. Only then is
+ * the run's template, `<databaseName>_<run id>`, created — empty, from the server's default
+ * template, ready to migrate — and marked. The admin URL is `url` itself; the handle's
+ * `markStatement` marks each Worker Database the pipeline clones.
  *
  * The handle's teardown drops the run's Worker Databases `1..workerCount` and its
  * template over a fresh admin connection — the full derived set, whatever a failed setup
- * got to create, and nothing else.
+ * got to create, and nothing else — and only then closes the held connection, releasing
+ * the lock.
  */
 export async function openUrlServer(options: {
   url: string;
@@ -38,15 +64,55 @@ export async function openUrlServer(options: {
   workerCount: number;
 }): Promise<ServerHandle> {
   const { url, source, databaseName, workerCount } = options;
-  const templateName = runTemplateName(databaseName, newRunId());
+  const runId = newRunId();
+  const templateName = runTemplateName(databaseName, runId);
   assertNamesFit(templateName, workerCount, databaseName);
   const server = redactUrl(url);
 
-  await withServer(url, source, async (connection) => {
-    const [check] = await connection.query<ServerCheck>(SERVER_CHECK_QUERY);
+  // Once the held connection drops, the lock is gone with it: say so, once, and never
+  // close what pg already closed.
+  let lost = false;
+  let held: HeldAdminConnection;
+  try {
+    held = await openAdminConnection(url, (error) => {
+      if (lost) return;
+      lost = true;
+      console.warn(lostLockMessage(server, error.message));
+    });
+  } catch (cause) {
+    throw connectFailure(cause, url, source);
+  }
+  const closeHeld = async () => {
+    if (!lost) await held.close();
+  };
+
+  const handle: ServerHandle = {
+    templateName,
+    templateUrl: databaseUrl(url, templateName),
+    adminUrl: url,
+    markStatement: (database) => markStatement(database, runId),
+    teardown: async () => {
+      try {
+        await dropRunDatabases(url, source, templateName, workerCount);
+      } catch (error) {
+        // The drops' error is the diagnostic one: a failed close must not mask it.
+        await closeHeld().catch(() => {});
+        throw error;
+      }
+      await closeHeld();
+    },
+  };
+
+  let created = false;
+  try {
+    const [check] = await held.connection.query<ServerCheck>(SERVER_CHECK_QUERY);
     assertServerUsable(check!, server);
+    await held.connection.query(runLockStatement(runId));
+    await sweep(held.connection, runId, server);
     try {
-      await connection.query(`CREATE DATABASE "${templateName}"`);
+      await held.connection.query(`CREATE DATABASE "${templateName}"`);
+      created = true;
+      await held.connection.query(markStatement(templateName, runId));
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new Error(
@@ -54,14 +120,45 @@ export async function openUrlServer(options: {
         { cause },
       );
     }
-  });
+  } catch (error) {
+    // Before the template exists there is nothing to drop; after, the teardown drops it.
+    // Either way the held connection closes, and the startup error is what rejects.
+    await (created ? handle.teardown() : closeHeld()).catch(() => {});
+    throw error;
+  }
+  return handle;
+}
 
-  return {
-    templateName,
-    templateUrl: databaseUrl(url, templateName),
-    adminUrl: url,
-    teardown: () => dropRunDatabases(url, source, templateName, workerCount),
-  };
+/**
+ * The Sweep: drop the marked databases of every other run on the server whose lock this
+ * session can take — its owner's session is gone, so the run is dead — and release that
+ * lock again. A run whose lock is held is live, and its databases stay. Only databases
+ * carrying a Run marker are ever considered, whatever their names.
+ *
+ * A database that cannot be dropped is another run's leftover, not this run's problem:
+ * it is reported in one line, and the run goes on. Reading the list or taking a lock is
+ * admin work like any other, and its failure fails the run.
+ */
+async function sweep(connection: AdminConnection, runId: string, server: string): Promise<void> {
+  const marked = await connection.query<MarkedDatabase>(MARKED_DATABASES_QUERY);
+  const dropped: string[] = [];
+  const failed: string[] = [];
+  for (const [deadRunId, databases] of leftoversByRun(marked, runId)) {
+    const [attempt] = await connection.query<{ locked: boolean }>(tryRunLockStatement(deadRunId));
+    if (attempt?.locked !== true) continue;
+    for (const database of databases) {
+      try {
+        await connection.query(dropDatabaseStatement(database));
+        dropped.push(database);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        failed.push(`${database} (${message})`);
+      }
+    }
+    await connection.query(runUnlockStatement(deadRunId));
+  }
+  if (dropped.length > 0) console.warn(sweptMessage(server, dropped));
+  if (failed.length > 0) console.warn(sweepFailedMessage(server, failed));
 }
 
 /**
@@ -97,8 +194,7 @@ async function dropRunDatabases(
 
 /**
  * {@link withAdminConnection} to the user's server, with a failed connect reported as
- * such: pg's own error names neither the URL nor which option supplied it. Failures
- * once connected keep their own error.
+ * such (see {@link connectFailure}). Failures once connected keep their own error.
  */
 async function withServer<T>(
   url: string,
@@ -113,12 +209,20 @@ async function withServer<T>(
     });
   } catch (cause) {
     if (connected) throw cause;
-    const message = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(
-      `could not connect to the Postgres server given by ${source} (${redactUrl(url)}): ` +
-        `${message} — check that the server is reachable from the test process and the ` +
-        "URL's credentials are right",
-      { cause },
-    );
+    throw connectFailure(cause, url, source);
   }
+}
+
+/**
+ * The error a failed connect to the user's server rejects with: pg's own error names
+ * neither the URL nor which option supplied it.
+ */
+function connectFailure(cause: unknown, url: string, source: UrlSource): Error {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return new Error(
+    `could not connect to the Postgres server given by ${source} (${redactUrl(url)}): ` +
+      `${message} — check that the server is reachable from the test process and the ` +
+      "URL's credentials are right",
+    { cause },
+  );
 }

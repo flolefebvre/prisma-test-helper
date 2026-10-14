@@ -191,7 +191,7 @@ async function provision(
       await assertTemplateReleased(server.adminUrl, server.templateName);
     }
     await installBaseline(server.templateUrl, server.templateName);
-    await cloneWorkerDatabases(server.adminUrl, server.templateName, workerCount(project));
+    await cloneWorkerDatabases(server, workerCount(project));
   } catch (error) {
     await server.teardown().catch(() => {});
     throw error;
@@ -347,9 +347,11 @@ async function installBaseline(templateUrl: string, databaseName: string): Promi
 }
 
 /**
- * Clone the migrated template into the Worker Databases, over an admin connection to
- * `adminUrl` — the `postgres` database, never the template, which must have no
- * connections while it is cloned.
+ * Clone the migrated template into the Worker Databases, over an admin connection to the
+ * server's `adminUrl` — the `postgres` database, never the template, which must have no
+ * connections while it is cloned. When the server marks what the run creates (url mode),
+ * each clone is marked right after it is created, on the same connection, so a run
+ * killed between the two leaves at most one unmarked database behind.
  *
  * It goes through `pg` from this process, not a client inside the container, because
  * that is the harness's one SQL path: it can return rows, which the Baseline snapshot
@@ -358,15 +360,14 @@ async function installBaseline(templateUrl: string, databaseName: string): Promi
  * transaction of a multi-statement string — and the first failure stops the run,
  * naming the Worker Database that failed.
  */
-async function cloneWorkerDatabases(
-  adminUrl: string,
-  databaseName: string,
-  count: number,
-): Promise<void> {
-  await withAdminConnection(adminUrl, async (connection) => {
+async function cloneWorkerDatabases(server: ServerHandle, count: number): Promise<void> {
+  const databaseName = server.templateName;
+  await withAdminConnection(server.adminUrl, async (connection) => {
     for (const { workerDatabase, statement } of cloneStatements(databaseName, count)) {
       try {
         await connection.query(statement);
+        const mark = server.markStatement?.(workerDatabase);
+        if (mark !== undefined) await connection.query(mark);
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         throw new Error(
