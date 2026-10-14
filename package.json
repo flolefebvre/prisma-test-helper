@@ -51,6 +51,8 @@
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
+    "test:integration-url": "vitest run --project integration-url",
+    "test:url-concurrent": "node scripts/concurrent-url-runs.mjs",
     "lint": "eslint --max-warnings 0",
     "duplicates": "jscpd",
     "format": "prettier -w .",
