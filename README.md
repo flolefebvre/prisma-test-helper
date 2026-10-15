@@ -50,10 +50,12 @@ test("starts from a clean database — the author above is gone", async () => {
 - **Parallel by default.** One database per Vitest worker slot, so files running in
   parallel cannot see each other's writes.
 - **Nothing to tear down.** The container is removed when the run ends, including after a
-  crash.
+  crash. In url mode the run drops its databases, and the next run drops those a killed
+  run left.
 
-**Postgres-only.** The harness starts a real Postgres in Docker and relies on
-`CREATE DATABASE … TEMPLATE` for cloning; no other database is supported.
+**Postgres-only.** The harness starts a real Postgres in Docker, or uses one you point it
+at, and relies on `CREATE DATABASE … TEMPLATE` for cloning; no other database is
+supported.
 
 ## How it works
 
@@ -95,7 +97,7 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 - Peer dependencies: **Vitest ^5.0.3** and **Prisma ^7**, with your migrations committed
   (`prisma migrate deploy` is what the harness runs).
 - A Postgres superuser for the Reset. The container's user is one, so there is nothing to
-  do.
+  do; in url mode, the URL's role must be one.
 - Testcontainers comes with this package; do not add it yourself. Under pnpm, none of
   its build scripts needs approving.
 
@@ -159,7 +161,7 @@ test("persists an author", async () => {
 ```
 
 `isolate: true` is Vitest's default and the one these docs prescribe: every test file
-gets fresh modules. `isolate: false` is a supported opt-in. Each worker then keeps your
+gets fresh modules. `isolate: false` is supported too. Each worker then keeps your
 app's modules and Prisma client across files, while every file still gets its own opt-in
 and a clean Worker Database. On a generated 73-table suite with a 300 ms app import, it
 cut the run by 46 % at 4 workers and 35 % at 16. The trade-offs: module state and
@@ -209,9 +211,10 @@ documents.
 git clone https://github.com/flolefebvre/prisma-test-helper.git
 cd prisma-test-helper
 pnpm install
-pnpm run generate      # generate the fixture Prisma client
-pnpm test              # unit + integration (integration needs Docker)
-pnpm run gate          # everything CI runs: typecheck, lint, duplication, tests, build
+pnpm run generate             # generate the fixture Prisma client
+pnpm test                     # every vitest project (all but unit need Docker)
+pnpm run gate                 # typecheck, lint, duplication, tests, build
+pnpm run test:url-concurrent  # not in the gate, but in CI: concurrent url-mode runs
 ```
 
 ## License

@@ -155,9 +155,12 @@ The 0.3 errors are gone. What replaces each:
 | `a test transaction is already live —`                                  | `setupDatabase() was called twice in this file`              |
 | `the database was touched with no test transaction live —`              | None: see the warning above. `beforeAll` writes are allowed. |
 
-New in 1.0, each with its fix in
-[Troubleshooting](troubleshooting.md#errors-from-this-package):
+New in 1.0 for an unchanged config, each with its fix in
+[Troubleshooting](troubleshooting.md#errors-from-this-package), which also lists the
+errors of the options 1.0 adds (`seed`, `postgresSettings`, `url`):
 
+- `could not create the harness schema "prisma_test_helper" in <name>:`
+- `snapshotting the Baseline of <name> failed:`
 - `refusing to reset <name> — only Worker Databases`
 - `refusing to reset — no Worker Database is configured for this file.`
 - `the client passed to setupDatabase() is connected to <name>, but`

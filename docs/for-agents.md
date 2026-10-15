@@ -54,7 +54,7 @@ signatures: [API](api.md).
    then fails the test.
 5. **Leave `pool: "forks"` and the project's `isolate` setting alone.** `isolate: true`,
    the default, gives every test file fresh modules. `isolate: false` is a supported
-   opt-in: keep it where the project chose it, and do not switch modes on your own. Under
+   mode: keep it where the project chose it, and do not switch modes on your own. Under
    it, module state, `vi.mock` calls and Reset Hooks registered in a test file carry over
    to later files on the worker, and DDL outside the migrations breaks later files'
    Resets: see [`isolate: false`](setup.md#isolate-false).
@@ -73,9 +73,9 @@ Each step links the section of [Setup](setup.md) that holds its code and its mer
 for files that already exist.
 
 1. **Preflight.** Confirm `prisma` and `@prisma/client` ^7, `vitest` ^5.0.3, Node
-   ^22.22, ^24 or >= 26, committed migrations, and `docker info`. Report every failing
-   requirement before touching a file; on too-old versions, stop. A CommonJS project is
-   fine. See [Before you start](setup.md#before-you-start).
+   ^22.22, ^24 or >= 26, committed migrations, and `docker info` (or a server for url
+   mode). Report every failing requirement before touching a file; on too-old versions,
+   stop. A CommonJS project is fine. See [Before you start](setup.md#before-you-start).
 2. **Install** `@flefebvre/prisma-test-helper` as a dev dependency with the package
    manager the lockfile names. Never add `testcontainers` yourself. Under pnpm, mark
    `cpu-features`, `ssh2` and `protobufjs` as not to be built, with the entries in
@@ -91,8 +91,10 @@ for files that already exist.
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).
 5. **Write the global-setup file**, pinning `image` from the project's compose file when
-   it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. See
-   [Global setup](setup.md#3-global-setup).
+   it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. If the
+   project seeds reference data its tests need (`migrations.seed` in
+   `prisma.config.ts`), pass a `seed` that calls the reference-data function, not the
+   whole script. See [Global setup](setup.md#3-global-setup).
 6. **Write or merge the setup file**, calling `setupWorkerDatabase()` first with no static
    app imports. If the app turns on TLS from an environment variable, override it right
    after: see [TLS](setup.md#tls). See [Per-worker setup](setup.md#4-per-worker-setup).

@@ -49,7 +49,7 @@ const resetHooks = new Set<ResetHook>();
 /**
  * Register a callback to run in every `beforeEach`, before the test body, against a
  * database the previous Reset already returned to its Baseline: empty, but for the rows
- * the migrations inserted.
+ * the migrations and the global-setup `seed` inserted.
  *
  * This is the seam factories plug into: reset a per-test sequence counter, seed faker
  * from `seed`, or anything else that must be fresh per test. Hooks are held in a Set, so
@@ -75,10 +75,10 @@ export function registerResetHook(hook: ResetHook): void {
  * Prisma client your app uses.
  *
  * Tests commit for real; the Reset returns the Worker Database to its Baseline around
- * them — every table empty but those the migrations left rows in, which it restores. A
- * `beforeAll` runs it once, so the file starts clean whatever an earlier file on this
- * worker left behind, and an `afterEach` runs it after every test. A `beforeEach` runs
- * the Reset Hooks. An `afterAll` vacuums the tables the file wrote to and every Baseline
+ * them — every table empty but those migrate and the seed left rows in, which it
+ * restores. A `beforeAll` runs it once, so the file starts clean whatever an earlier file
+ * on this worker left behind, and an `afterEach` runs it after every test. A `beforeEach`
+ * runs the Reset Hooks. An `afterAll` vacuums the tables the file wrote to and every Baseline
  * table, which keeps the next file's Resets cheap; it is best effort and never fails the
  * file.
  *

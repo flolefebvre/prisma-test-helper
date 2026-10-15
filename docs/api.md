@@ -38,7 +38,7 @@ to them: see
 [Rows your migrations insert](writing-tests.md#rows-your-migrations-insert).
 
 It refuses, synchronously and before registering anything, unless `DATABASE_URL` names a
-Worker Database (`<databaseName>_<pool id>`). Its `beforeAll` also refuses a client
+Worker Database (`<template>_<pool id>`). Its `beforeAll` also refuses a client
 connected to any other database than that one. Tests commit for real, so a misrouted
 suite would otherwise empty a real database. A second call in the same file throws.
 
@@ -84,7 +84,7 @@ function setupWorkerDatabase(): WorkerDatabase;
 
 Points this worker at its own Worker Database. Call it from your Vitest setup file. It
 reads what `createGlobalSetup` provided, rewrites the URI onto this worker's clone
-(`<databaseName>_<VITEST_POOL_ID>`), sets `process.env.DATABASE_URL`, and returns both
+(`<template>_<VITEST_POOL_ID>`), sets `process.env.DATABASE_URL`, and returns both
 halves as a [`WorkerDatabase`](#workerdatabase). The harness reads them itself, so the
 setup file may ignore the return value.
 
@@ -111,7 +111,7 @@ databases it created when the run ends.
 | Option             | Default              | What it does                                                                                                                                                                                                                       |
 | ------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `image`            | `postgres:18-alpine` | Postgres image to run. Pin it to the same major as your production database, so a test never runs against a different Postgres than you deploy on.                                                                                 |
-| `databaseName`     | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<databaseName>_1..N`. It never hosts a test.                                                                                                               |
+| `databaseName`     | `prisma_test`        | Name of the Template Database: migrated once per run, then cloned into `<template>_1..N`. It never hosts a test.                                                                                                                   |
 | `seed`             | none                 | Your project's own seed function, run once per run on the Template Database, after migrate and before cloning. Every table it fills is a Baseline table: see [The `seed` option](#the-seed-option).                                |
 | `postgresSettings` | none                 | Postgres server settings for the container, each passed as `-c name=value`, over the built-in `fsync=off`, `synchronous_commit=off` and `full_page_writes=off`: see [The `postgresSettings` option](#the-postgressettings-option). |
 | `url`              | none                 | Connection URL of an existing Postgres server to run against instead of starting a container. `PRISMA_TEST_HELPER_URL` overrides it. Refused alongside `image` or `postgresSettings`: see [The `url` option](#the-url-option).     |
@@ -159,7 +159,8 @@ export default createGlobalSetup({
   before any worker has a `DATABASE_URL`; a client module that reads it at import time
   throws, or points at your dev database.
 - **A seed that throws fails the run** with `the seed failed:` and your error as `cause`.
-  The container is stopped. The seed's output is not captured.
+  The run tears down as on any failure: the container is stopped, or in url mode the
+  run's databases are dropped. The seed's output is not captured.
 - **Seed reference data, not demo data.** The harness does not run `prisma db seed`. A
   seed that also creates demo rows, such as an admin user, makes their tables Baseline
   tables too, and every test that writes one of them pays that table's restore. Call your
@@ -203,7 +204,8 @@ objects an extension owns.
   given another value.
 - **Values.** Booleans become `on` / `off` and numbers are stringified. Strings are
   passed as-is, with no shell involved, so they need no quoting. Postgres checks the
-  values itself: a bad one fails the container's startup with Postgres's own message.
+  values itself: a bad one makes the container exit at startup, and the run fails with
+  Docker's `container … is not running`, not Postgres's message.
 - **Names.** A name is lowercase letters, digits and underscores, optionally prefixed by
   an extension's name and a dot, such as `auto_explain.log_min_duration`. Any other name
   fails the run with `postgresSettings: invalid setting name`, before the container

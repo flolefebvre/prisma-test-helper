@@ -1,6 +1,7 @@
-// The Baseline: the rows `prisma migrate deploy` leaves in the Template Database, which
-// every test starts from. This module is the shared SQL vocabulary of that feature, and
-// of "which tables count" in general — pure strings and builders, no I/O, no driver:
+// The Baseline: the rows `prisma migrate deploy` and the global-setup `seed` leave in the
+// Template Database, which every test starts from. This module is the shared SQL
+// vocabulary of that feature, and of "which tables count" in general — pure strings and
+// builders, no I/O, no driver:
 //
 // - the one definition of the tables and owned sequences the harness manages, as CTE
 //   fragments both the Reset's discovery (`src/reset.ts`) and the Baseline install use;

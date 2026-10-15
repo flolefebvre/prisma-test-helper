@@ -59,8 +59,9 @@ jobs:
           "
 
   # The everyday gate, unmodified, on both Node legs (floor and 24): typecheck, lint,
-  # duplication, unit + integration suites (real Postgres container), build, and the
-  # tarball-contents assertion. `needs: ci` waits for every leg.
+  # duplication, every vitest project (real Postgres containers, url mode included), the
+  # concurrent url-mode check, build, and the tarball-contents assertion. `needs: ci`
+  # waits for every leg.
   ci:
     name: ci
     needs: guard
