@@ -257,7 +257,9 @@ export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
 
 Or leave the config alone and set `PRISMA_TEST_HELPER_URL` on the machine that should use
 a server: when non-empty it overrides `url`, and any `image` or `postgresSettings` in the
-config is ignored, with one line on stderr. Details: [The `url` option](api.md#the-url-option).
+config is ignored, with one line on stderr. If the config pins `image` (step 3), use the
+variable: `url` and `image` together fail the run. Details:
+[The `url` option](api.md#the-url-option).
 
 Requirements, checked when the run starts, before any database is created:
 
@@ -271,6 +273,9 @@ Requirements, checked when the run starts, before any database is created:
   from there (see below). Postgres ships that database by default, managed services too.
 - **Reachable from the test process.** The global setup and every worker connect to it
   directly, from the machine running Vitest.
+- **TLS in the URL.** The harness connects without TLS unless the URL sets `sslmode`; it
+  ignores `PGSSLMODE`. For a server that requires TLS, add `?sslmode=require` (or
+  stricter) to the URL. The template and Worker Database URLs keep it.
 
 Trade-off: the container's tuning (a tmpfs data directory, `fsync=off`,
 `synchronous_commit=off`, `full_page_writes=off`) does not apply. The server's own
@@ -337,11 +342,12 @@ time.
 
 ### TLS
 
-The container speaks plaintext. If your app turns on TLS whenever a variable is set (an
-SSL mode, a CA path), every database test fails with
-`The server does not support SSL connections`. Set the variable your app checks to its
-off value, below `setupWorkerDatabase()` (for a CA path, the empty string). For `pg`'s
-own `PGSSLMODE`:
+The container speaks plaintext. (In url mode against a server that requires TLS, skip
+this section: the Worker Database URL already carries the URL's `sslmode`.) If your app
+turns on TLS whenever a variable is set (an SSL mode, a CA path), every database test
+fails with `The server does not support SSL connections`. Set the variable your app
+checks to its off value, below `setupWorkerDatabase()` (for a CA path, the empty string).
+For `pg`'s own `PGSSLMODE`:
 
 ```ts
 setupWorkerDatabase();
@@ -387,10 +393,10 @@ app.
 
 Under `isolate: false` each worker keeps its modules across the test files it runs: your
 app's import graph is loaded once per worker instead of once per file, and your Prisma
-client and its connection pool are reused. The harness supports it as an opt-in. Every
-file still runs `tests/setup.ts` first and starts from a clean Worker Database, each
-file's `setupDatabase(db)` opt-in belongs to that file alone, and the Reset is built once
-per worker instead of once per file.
+client and its connection pool are reused. The harness supports it. Every file still
+runs `tests/setup.ts` first and starts from a clean Worker Database, each file's
+`setupDatabase(db)` opt-in belongs to that file alone, and the Reset is built once per
+worker instead of once per file.
 
 What it saves, measured on a generated suite of 73 tables, 8 files per worker of 20 tests,
 and an app import costing about 300 ms: **46 % of the run at 4 workers (12.0 → 6.5 s) and

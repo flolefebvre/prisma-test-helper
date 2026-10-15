@@ -23,7 +23,7 @@ export interface WorkerDatabase {
  * Point this worker at its own Worker Database.
  *
  * Call it from your Vitest setup file. It reads what `createGlobalSetup` provided,
- * rewrites the URI onto this worker's clone (`<databaseName>_<VITEST_POOL_ID>`), sets
+ * rewrites the URI onto this worker's clone (`<template>_<VITEST_POOL_ID>`), sets
  * `process.env.DATABASE_URL`, and returns both halves — the URL and the template name.
  *
  * **Ordering matters.** The assignment below must happen before any module that reads

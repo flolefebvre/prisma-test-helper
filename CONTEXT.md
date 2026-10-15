@@ -1,8 +1,8 @@
 # prisma-test-helper
 
 A standalone library that gives Prisma + Vitest projects an isolated Postgres database
-per test: one throwaway container per run, one database per worker, returned to its
-Baseline after every test.
+per test: one throwaway container (or, in url mode, an existing server) per run, one
+database per worker, returned to its Baseline after every test.
 
 ## Language
 
@@ -66,10 +66,16 @@ Vitest's default `isolate: true`, where every file starts with fresh modules, th
 per file.
 _Avoid_: truncation, cleanup, wipe
 
+**Opt-in**:
+A test file's call to `setupDatabase(db)`, which gives it the Reset. It belongs to that
+one file, under `isolate: false` too: the `/setup` entry clears it at every file's start.
+_Avoid_: calling `isolate: false` an opt-in; it is a mode
+
 **Reset Hook**:
 A consumer callback run in every `beforeEach`, after the previous Reset. Receives
 `{ testName, seed }`, where `seed` is a deterministic hash of the test name — this is the
-seam through which consumer factories reset their counters and seed faker.
+seam through which consumer factories reset their counters and seed faker. Not to be
+confused with global setup's `seed` option, the function that feeds the Baseline.
 
 ## Retired
 

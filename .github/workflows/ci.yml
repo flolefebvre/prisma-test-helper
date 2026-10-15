@@ -66,17 +66,16 @@ jobs:
       - name: Duplication check
         run: pnpm run duplicates
 
-      - name: Unit tests (Docker-free)
-        run: pnpm run test:unit
+      # `pnpm test`, the gate's own test command: every vitest project (unit, integration,
+      # integration-no-isolate, integration-url), so CI cannot drift from the gate. The
+      # container projects and url mode's stand-in server all run on ubuntu-latest's Docker.
+      - name: Tests
+        run: pnpm test
 
-      # ubuntu-latest ships a running Docker daemon; the run boots a real Postgres
-      # container through the repo's own global-setup wiring.
-      - name: Integration tests
-        run: pnpm run test:integration
-
-      # End-to-end proof of the isolate: false opt-in: the unit tests pin the mechanics, this pins the mode.
-      - name: "Integration tests (isolate: false)"
-        run: pnpm run test:integration-no-isolate
+      # Not in the gate: url-mode runs sharing one server, one of them killed, and the next
+      # run's Sweep dropping what it left. Starts its own Postgres on Docker.
+      - name: "url mode: concurrent runs and the Sweep"
+        run: pnpm run test:url-concurrent
 
       - name: Build
         run: pnpm run build

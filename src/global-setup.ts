@@ -30,9 +30,9 @@ declare module "vitest" {
     templateDatabaseUri: string;
     /**
      * Name of the Template Database the Worker Databases were cloned from — in url mode,
-     * `<databaseName>_<run id>`. Workers
-     * rewrite the URI path from it (`<databaseName>_<pool id>`) and the Worker Database
-     * guard derives the shape it admits from it.
+     * `<databaseName>_<run id>`. Workers rewrite the URI path from it
+     * (`<template>_<pool id>`) and the Worker Database guard derives the shape it admits
+     * from it.
      */
     templateDatabaseName: string;
   }
@@ -48,7 +48,7 @@ export interface CreateGlobalSetupOptions {
   image?: string;
   /**
    * Name of the Template Database: migrated once per run, then cloned once per Vitest
-   * worker slot into the Worker Databases `<databaseName>_1..N`. It never hosts a test.
+   * worker slot into the Worker Databases `<template>_1..N`. It never hosts a test.
    * @default "prisma_test"
    */
   databaseName?: string;
@@ -129,7 +129,7 @@ export interface CreateGlobalSetupOptions {
  * starts one throwaway Postgres on a random host port — or, in url mode, creates a
  * Template Database unique to the run on an existing server — migrates the Template Database
  * with the consumer project's own `prisma migrate deploy`, and clones one Worker
- * Database per worker slot: `<databaseName>_1..maxWorkers`. `VITEST_POOL_ID` is always
+ * Database per worker slot: `<template>_1..maxWorkers`. `VITEST_POOL_ID` is always
  * within that range — the pool leases ids from a fixed `1..maxWorkers` map — so every
  * fork finds its database already provisioned.
  *
@@ -274,8 +274,8 @@ const RELEASE_INTERVAL_MS = 100;
  * Anything connected to the template makes `CREATE DATABASE … TEMPLATE` fail with
  * SQLSTATE 55006, an error that names cloning rather than the seed that caused it. The
  * install is unaffected — it connects to the template itself — so this runs right after
- * the seed, from an admin connection to `adminUrl` (the `postgres` database, so this
- * session is not counted). Only client backends count: autovacuum and other background
+ * the seed, from an admin connection to `adminUrl` (never the template, so this session
+ * is not counted). Only client backends count: autovacuum and other background
  * processes on the template report its name too, but `CREATE DATABASE` waits them out.
  *
  * A client that disconnected has closed its socket, but its backend exits a moment
@@ -352,10 +352,10 @@ async function installBaseline(templateUrl: string, databaseName: string): Promi
 
 /**
  * Clone the migrated template into the Worker Databases, over an admin connection to the
- * server's `adminUrl` — the `postgres` database, never the template, which must have no
- * connections while it is cloned. When the server marks what the run creates (url mode),
- * each clone is marked right after it is created, on the same connection, so a run
- * killed between the two leaves at most one unmarked database behind.
+ * server's `adminUrl` — never the template, which must have no connections while it is
+ * cloned. When the server marks what the run creates (url mode), each clone is marked
+ * right after it is created, on the same connection, so a run killed between the two
+ * leaves at most one unmarked database behind.
  *
  * It goes through `pg` from this process, not a client inside the container, because
  * that is the harness's one SQL path: it can return rows, which the Baseline snapshot

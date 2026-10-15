@@ -1,7 +1,7 @@
 // The Reset: the pass that returns a Worker Database to its Baseline — every table
-// empty but those the migrations left rows in, which it restores — once before a file's
-// first test and once after every test. Tests commit for real, so this is what keeps
-// one test's rows out of the next. It runs through the consumer's own Prisma client —
+// empty but those migrate and the seed left rows in, which it restores — once before a
+// file's first test and once after every test. Tests commit for real, so this is what
+// keeps one test's rows out of the next. It runs through the consumer's own Prisma client —
 // structurally typed below, never imported — so the package needs no database driver
 // and the statement lands on the connection the tests themselves use.
 //

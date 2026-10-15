@@ -41,8 +41,8 @@ it clones the Worker Databases. Every test starts with those rows:
   truncated one, the Reset restores it from the snapshot. A test that wrote none pays
   next to nothing; a restore costs about the time it takes to copy that table's rows.
 - **Ids continue from the snapshot.** A sequence a Baseline table owns goes back to
-  where the migrations left it, so an insert into a lookup table with three migration
-  rows gets id 4, in every test and every run order. Sequences of every other table
+  where migrate and the seed left it, so an insert into a lookup table with three
+  migration rows gets id 4, in every test and every run order. Sequences of every other table
   restart at their start value, as before.
 - **Partitioned Baseline tables are restored after every test**, written or not. A
   write aimed straight at a partition cannot be tracked, so the harness does not try.
@@ -184,7 +184,7 @@ if (!isDatabaseSetUp()) {
 Two wiring rules hold for as long as the harness is installed:
 
 - **Keep `pool: "forks"`, and `isolate` as the project set it.** `isolate: true`, the
-  default, gives every test file fresh modules. `isolate: false` is a supported opt-in
+  default, gives every test file fresh modules. `isolate: false` is a supported mode
   that runs faster: each file still starts from a clean Worker Database with its own
   opt-in, but your module state, `vi.mock` calls and Reset Hooks registered in a test
   file carry over to later files on that worker, and schema changes outside the
