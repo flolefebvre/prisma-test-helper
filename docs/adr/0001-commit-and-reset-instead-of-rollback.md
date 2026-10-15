@@ -406,7 +406,7 @@ opt-in.
 
 ### Measurements
 
-[`../plans/0022-isolate-false/measure-isolate.mjs`](../plans/0022-isolate-false/measure-isolate.mjs)
+[`0001-bench/measure-isolate.mjs`](0001-bench/measure-isolate.mjs)
 runs real Vitest over a generated suite through the repo's own container global setup.
 
 - **Schema:** the repo's schema padded to 73 tables in bench4's shape, and a `Tag`
@@ -421,7 +421,33 @@ runs real Vitest over a generated suite through the repo's own container global 
   - `none`, with no `afterAll` `VACUUM`.
 - **Runs:** W = 4 and 16, 3 interleaved rounds, on WSL2 with 20 cores.
 
-The full table is in [`PLAN.md`](../plans/0022-isolate-false/PLAN.md) next to the script.
+```
+pnpm build && pnpm generate
+node docs/adr/0001-bench/measure-isolate.mjs
+```
+
+The full run, medians over the rounds. Suite is first file start to last file end, in s;
+file is the setup file to the end of the `afterAll`. Reset 1 is the `beforeAll` Reset,
+Reset 2 the first `afterEach` one, later the rest, and late files the later Resets of each
+worker's last two files. All other columns are in ms.
+
+| W   | isolate | variant       | suite (rounds)            | file | Reset 1 | Reset 2 | later | late files | afterAll |
+| --- | ------- | ------------- | ------------------------- | ---- | ------- | ------- | ----- | ---------- | -------- |
+| 4   | true    | shipped       | 11.97 (11.93/11.97/12.13) | 1343 | 22.7    | 19.2    | 18.7  | 18.6       | 21.5     |
+| 4   | true    | baseline-only | 12.40 (12.40/12.66/10.34) | 1391 | 45.8    | 20.3    | 19.9  | 20.3       | 10.4     |
+| 4   | true    | none          | 10.53 (10.53/10.34/12.18) | 1388 | 47.5    | 24.7    | 20.4  | 21.2       | 0.1      |
+| 4   | false   | shipped       | 6.47 (6.47/6.44/6.51)     | 684  | 5.5     | 17.3    | 18.5  | 18.4       | 17.9     |
+| 4   | false   | baseline-only | 6.62 (6.62/6.50/6.74)     | 714  | 6.0     | 18.7    | 19.5  | 20.2       | 7.2      |
+| 4   | false   | none          | 6.62 (6.62/6.55/6.65)     | 717  | 5.6     | 21.5    | 20.2  | 20.9       | 0.0      |
+| 16  | true    | shipped       | 15.54 (16.15/14.85/15.54) | 1850 | 33.3    | 34.6    | 28.5  | 27.9       | 33.2     |
+| 16  | true    | baseline-only | 14.87 (14.87/14.70/18.06) | 1884 | 67.0    | 35.1    | 29.6  | 29.8       | 15.2     |
+| 16  | true    | none          | 18.19 (16.29/18.19/19.24) | 2144 | 71.5    | 48.0    | 35.9  | 44.3       | 0.1      |
+| 16  | false   | shipped       | 10.08 (10.08/9.40/10.08)  | 1036 | 7.7     | 28.2    | 29.1  | 30.1       | 28.1     |
+| 16  | false   | baseline-only | 9.50 (9.50/9.30/10.14)    | 1043 | 8.7     | 27.6    | 29.1  | 29.5       | 9.7      |
+| 16  | false   | none          | 10.96 (10.96/11.03/10.78) | 1265 | 8.8     | 37.1    | 36.0  | 43.9       | 0.0      |
+
+Between variants the suite times fall within the spread of the rounds (one
+`baseline-only` round at W = 4 took 10.34 s). The per-hook columns are the clean signal.
 
 **The saving**, `shipped` in both modes:
 

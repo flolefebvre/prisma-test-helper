@@ -84,7 +84,7 @@ test("every docs/*.md page is in the tarball", () => {
 test("the tarball holds only the build, the docs pages, README, LICENSE and package.json", () => {
   const allowed = /^(dist\/|docs\/[^/]+\.md$|README\.md$|LICENSE$|package\.json$)/;
   expect(packed.filter((file) => !allowed.test(file))).toEqual([]);
-  for (const internal of ["docs/adr/", "docs/agents/", "docs/plans/", "skills/"]) {
+  for (const internal of ["docs/adr/", "docs/agents/", "skills/"]) {
     expect(packed.filter((file) => file.startsWith(internal))).toEqual([]);
   }
 });
