@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   hashName,
@@ -7,6 +7,7 @@ import {
   registerResetHook,
   type ResetHookContext,
 } from "./database.js";
+import { beginFile } from "./opt-in.js";
 import type { ResetClient } from "./reset.js";
 
 // Docker-free: `registerDatabase` — `setupDatabase` with its environment reads made
@@ -21,15 +22,24 @@ const WORKER_URL = "postgresql://u:p@localhost:5432/prisma_test_1";
 /** Records every lifecycle event, so hook ordering relative to the Reset is checkable. */
 const events: string[] = [];
 
+/**
+ * Where the Reset Hook below logs. Reset Hooks are module-wide, so the lifecycles at the
+ * end of this file point it at their own log while they run.
+ */
+let hookLog = events;
+
+/** Answers the guard's check, the discovery query and the vacuum probe, logging the probe. */
+function answerQuery(log: string[], query: string): unknown[] {
+  if (query.includes("current_database()::text")) return [{ name: "prisma_test_1" }];
+  if (query.includes("t.item AS name")) {
+    log.push("vacuum probe");
+    return [{ name: '"public"."Author"' }];
+  }
+  return [{ kind: "table", schema: "public", name: "Author", relkind: "r", start_value: null }];
+}
+
 const stub: ResetClient = {
-  $queryRawUnsafe: async (query: string) => {
-    if (query.includes("current_database()::text")) return [{ name: "prisma_test_1" }];
-    if (query.includes("t.item AS name")) {
-      events.push("vacuum probe");
-      return [{ name: '"public"."Author"' }];
-    }
-    return [{ kind: "table", schema: "public", name: "Author", relkind: "r", start_value: null }];
-  },
+  $queryRawUnsafe: async (query: string) => answerQuery(events, query),
   $executeRawUnsafe: async (query: string) => {
     events.push(query.startsWith("VACUUM") ? "vacuum" : "reset");
     return 0;
@@ -41,7 +51,12 @@ const stub: ResetClient = {
 // files did not run last.
 afterAll(() => {
   expect(events.slice(-3)).toEqual(["reset", "vacuum probe", "vacuum"]);
+  vi.resetConfig();
 });
+
+// Short, so the Resets held open below time their hook out quickly; every other hook in
+// this file is a stub that settles at once. Set before any hook is registered.
+vi.setConfig({ hookTimeout: 500 });
 
 // Read before `registerDatabase()` runs: the opt-in flag has to start out false, and the
 // call below flips it during collection.
@@ -78,7 +93,7 @@ describe("setupDatabase", () => {
   let asyncHookFinished = false;
 
   const hook = (context: ResetHookContext) => {
-    events.push("reset hook");
+    hookLog.push("reset hook");
     seen.push(context);
   };
   // Registered twice on purpose: hooks are held in a Set, so one registration wins.
@@ -133,5 +148,219 @@ describe("setupDatabase", () => {
     expect(() => registerDatabase(stub, WORKER_URL, "prisma_test")).toThrow(
       "setupDatabase() was called twice in this file",
     );
+  });
+});
+
+/**
+ * A stub client whose next Reset can be held open — past `hookTimeout`, as a slow server
+ * would — then released, and can fail. Each lifecycle below gets its own log.
+ */
+function holdableStub() {
+  const log: string[] = [];
+  let hold: { gate?: Promise<void>; failWith?: Error } | undefined;
+  let release = () => {};
+
+  const client: ResetClient = {
+    $queryRawUnsafe: async (query: string) => answerQuery(log, query),
+    $executeRawUnsafe: async (query: string) => {
+      if (query.startsWith("VACUUM")) {
+        log.push("vacuum");
+        return 0;
+      }
+      log.push("reset");
+      const held = hold;
+      hold = undefined;
+      if (held?.gate) {
+        await held.gate;
+        log.push("held reset finished");
+      }
+      if (held?.failWith) throw held.failWith;
+      return 0;
+    },
+  };
+
+  return {
+    client,
+    log,
+    /** Hold the next Reset open until {@link releaseSoon}; then fail it, if given. */
+    holdNextReset(failWith?: Error) {
+      hold = { gate: new Promise<void>((resolve) => (release = resolve)), failWith };
+    },
+    /** Fail the next Reset at once. */
+    failNextReset(error: Error) {
+      hold = { failWith: error };
+    },
+    /**
+     * Release the held Reset on the next macrotask — after the hook that calls this has
+     * returned and the harness's own hook has started — so a harness hook that did not wait
+     * for the Reset would run ahead of it.
+     */
+    releaseSoon() {
+      // Bound now: a Reset held after this call is not the one it releases.
+      const releaseHeld = release;
+      setTimeout(() => releaseHeld(), 0);
+    },
+  };
+}
+
+/**
+ * The errors each test failed with, by test name. Register it before `registerDatabase`:
+ * it then runs after the harness's `afterEach` — when that one passed.
+ */
+function recordTestErrors(): Map<string, string[]> {
+  const testErrors = new Map<string, string[]>();
+  afterEach(({ task }) => {
+    testErrors.set(task.name, task.result?.errors?.map((error) => error.message) ?? []);
+  });
+  return testErrors;
+}
+
+/** The message the Reset's error carries when the stub fails it with "boom". */
+const BOOM = /^the Reset could not empty prisma_test_1: boom\n/;
+
+// The Reset's `afterEach` has no timeout of its own: when one outlasts `hookTimeout`,
+// Vitest fails that test and moves on while the Reset keeps running. These lifecycles hold
+// a Reset open until a hook of the next step releases it, so the timeout always fires and
+// the release always comes after it. Each registers in its own describe, after
+// `beginFile()` (what the `/setup` entry does per file), so its hooks scope to it.
+
+describe("a Reset that outlasts hookTimeout", () => {
+  const stub = holdableStub();
+  beforeAll(() => {
+    hookLog = stub.log;
+  });
+
+  // Registered before `registerDatabase`, so it runs ahead of the harness's `beforeEach`.
+  beforeEach(() => stub.releaseSoon());
+
+  beginFile();
+  registerDatabase(stub.client, WORKER_URL, "prisma_test");
+
+  test("leaves the normal path unchanged: one Reset, then the hooks", () => {
+    expect(stub.log).toEqual(["reset", "reset hook"]);
+  });
+
+  test.fails("fails the test whose afterEach it timed out", () => {
+    stub.holdNextReset();
+  });
+
+  test("is awaited by the next test before the Reset Hooks run", () => {
+    expect(stub.log.slice(-3)).toEqual(["reset", "held reset finished", "reset hook"]);
+  });
+});
+
+describe("a Reset that outlasts hookTimeout, then fails", () => {
+  const stub = holdableStub();
+  const failure = new Error("boom");
+  beforeAll(() => {
+    hookLog = stub.log;
+  });
+
+  // Registered before `registerDatabase`: runs ahead of the harness's `beforeEach`.
+  beforeEach(() => stub.releaseSoon());
+  const testErrors = recordTestErrors();
+
+  beginFile();
+  registerDatabase(stub.client, WORKER_URL, "prisma_test");
+
+  test.fails("fails the test whose afterEach it timed out", () => {
+    stub.holdNextReset(failure);
+  });
+
+  test.fails("fails the next test with its own error, before the Reset Hooks", () => {});
+
+  test("fails one test only: the one after runs on a fresh Reset", () => {
+    expect(
+      testErrors.get("fails the next test with its own error, before the Reset Hooks"),
+    ).toEqual([expect.stringMatching(BOOM)]);
+    // The failed test ran no Reset Hook: the held Reset failed it first.
+    expect(stub.log.slice(-5)).toEqual([
+      "reset hook",
+      "reset",
+      "held reset finished",
+      "reset",
+      "reset hook",
+    ]);
+  });
+});
+
+describe("a Reset still running when the file ends", () => {
+  const stub = holdableStub();
+  beforeAll(() => {
+    hookLog = stub.log;
+  });
+
+  // Registered before `registerDatabase`: with `sequence.hooks: "stack"` this `afterAll`
+  // runs after the harness's, and checks the VACUUM waited for the held Reset.
+  afterAll(() => {
+    expect(stub.log.slice(-4)).toEqual(["reset", "held reset finished", "vacuum probe", "vacuum"]);
+  });
+
+  beginFile();
+  registerDatabase(stub.client, WORKER_URL, "prisma_test");
+
+  // Registered after: runs ahead of the harness's `afterAll`.
+  afterAll(() => stub.releaseSoon());
+
+  test.fails("is awaited by the afterAll before it vacuums", () => {
+    stub.holdNextReset();
+  });
+});
+
+describe("a Reset that outlasts the next test's beforeEach too", () => {
+  const stub = holdableStub();
+  beforeAll(() => {
+    hookLog = stub.log;
+  });
+
+  beginFile();
+  registerDatabase(stub.client, WORKER_URL, "prisma_test");
+
+  // Registered after: runs ahead of the harness's `afterEach`, once the next test's
+  // `beforeEach` has timed out waiting for the held Reset.
+  afterEach(({ task }) => {
+    if (task.name.startsWith("times out")) stub.releaseSoon();
+  });
+
+  test.fails("holds its Reset open", () => {
+    stub.holdNextReset();
+  });
+
+  test.fails("times out waiting for it in beforeEach", () => {});
+
+  test("never overlaps it: the next Reset starts once it settles", () => {
+    // The timed-out test ran no Reset Hook, not even once the held Reset settled.
+    expect(stub.log).toEqual([
+      "reset",
+      "reset hook",
+      "reset",
+      "held reset finished",
+      "reset",
+      "reset hook",
+    ]);
+  });
+});
+
+describe("a Reset that fails at once", () => {
+  const stub = holdableStub();
+  beforeAll(() => {
+    hookLog = stub.log;
+  });
+  const testErrors = recordTestErrors();
+
+  beginFile();
+  registerDatabase(stub.client, WORKER_URL, "prisma_test");
+
+  test.fails("fails the test it ran after", () => {
+    stub.failNextReset(new Error("boom"));
+  });
+
+  test.fails("fails the next test with its error: its database was not emptied", () => {});
+
+  test("fails no other: the test after runs on a fresh Reset", () => {
+    expect(
+      testErrors.get("fails the next test with its error: its database was not emptied"),
+    ).toEqual([expect.stringMatching(BOOM)]);
+    expect(stub.log).toEqual(["reset", "reset hook", "reset", "reset", "reset hook"]);
   });
 });

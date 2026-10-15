@@ -109,7 +109,9 @@ directory, `fsync=off`), against a 50-table schema with foreign keys and indexes
 - **Seeding is a follow-up.** Restoring a seeded baseline instead of resetting to empty
   measured 7 / 19 / 91 ms per test at 20 / 200 / 2000 rows per table. Per-file baselines,
   which would make `beforeAll` fixtures last for a whole file, belong to that follow-up,
-  not to this decision.
+  not to this decision. _Followed up by
+  [ADR 0002](0002-baseline-restore.md): rows the migrations insert form a Baseline that
+  the Reset restores, and only for the tables a test wrote to._
 - **The setup file shrinks to `setupWorkerDatabase()`.** The ordering rule (no static app
   imports there) still holds, because the client must be built after `DATABASE_URL` is
   set. A violation still fails loudly: either the client module's own unset-variable
@@ -123,7 +125,8 @@ directory, `fsync=off`), against a 50-table schema with foreign keys and indexes
   `CACHE` above 1 (Prisma never emits one) can hand a later test pre-Reset ids from a
   pooled connection.
 - **`pool: "forks"` with `isolate: true` remains the documented requirement.** The opt-in
-  flag and the cached Reset statement are per-file module state.
+  flag and the cached Reset statement are per-file module state. _Revised by amendment 3:
+  `isolate: true` stays the default, and `isolate: false` is a supported opt-in._
 
 ## Amendment 2026-10-11 — no probe, one planned statement
 
@@ -343,3 +346,152 @@ unguarded `VACUUM` of 8 tables took 5.16–5.19 s and left that heap nonzero. Gu
 Under `isolate: false` (#22), backends would live for the whole run. The cold Reset then
 becomes rare, so the saving shrinks while the warm cost stays: #22 should revisit whether
 the probe stays on in that mode.
+
+## Amendment 2026-10-14 — `isolate: false` as an opt-in
+
+Issue #40 (parent #22). Under Vitest's `isolate: false` a worker keeps its modules across
+the test files it runs: the app's import graph, its Prisma client and connection pool,
+and this package's own modules. Before this amendment the harness broke there:
+
+- The opt-in flag was module state, so the second opted-in file on a worker threw
+  "`setupDatabase()` was called twice in this file".
+- A file that never opted in read a neighbour's `isDatabaseSetUp()` as `true`.
+
+`isolate: true` stays the default the docs prescribe. `isolate: false` becomes a supported
+opt-in.
+
+### Decision
+
+- **A file's opt-in state belongs to that file, begun by the `/setup` entry.**
+  - `setupWorkerDatabase()` clears it as its first step, before any check that can throw.
+    Vitest runs `setupFiles` before collecting every file in both modes, and the call is
+    already mandatory, so it is the one per-file hook the library owns.
+  - The state lives in a small module (`src/opt-in.ts`) shared with `database.ts`. Vitest
+    re-evaluates the setup file but not its imports, so that module is one instance per
+    worker. `database.ts` keeps one code path for both modes, and nothing detects the mode.
+  - **Rejected: keying the state on the test path** (`expect.getState().testPath`, valid
+    at collection). Under `isolate: false` the module cache also survives watch-mode
+    reruns, so rerunning a file would find its own path already opted in and throw.
+  - **Rejected: an `afterAll` that clears the flag.** A file that fails during collection
+    after opting in never runs it, and the next file would throw.
+- **Discovery is cached per worker, keyed by the Worker Database URL**
+  (`prepareReset`).
+  - The cache holds what discovery produced, the built Reset statement and the vacuum
+    probe: pure strings, never a closure.
+  - Both guards still run on every call, the `current_database()` check included.
+  - The returned functions close over the calling file's client, so a later file that
+    passes another client is reset through its own.
+  - A failed discovery is not kept.
+  - Under `isolate: true` the module is new per file, so the cache only ever holds that
+    file's discovery: nothing is mode-specific.
+  - **The cost:** DDL a test runs outside the migrations is not seen by later files on
+    the worker. A table a test drops makes their Reset fail loudly
+    (`relation … does not exist`), because `to_regclass` returns NULL and the table
+    counts as dirty. This is documented as a limit of the opt-in.
+    `tests/integration/discovery.test.ts`, which builds and drops a fixture schema, clears
+    the cache around it through an internal export.
+- **Reset Hooks stay per worker.** Factory modules register them at import, which happens
+  once per worker under `isolate: false`, so the set is never cleared. A hook registered
+  inside one test file's body carries over to later files on that worker. That is
+  documented.
+- **The `VACUUM` between files stays unconditional, both of its jobs, in both modes.**
+  - **Job (a)** returns emptied heaps to 0 bytes so a fresh backend's storage probe skips
+    them (amendment 2).
+  - **Job (b)** clears the dead rows Baseline restores leave (ADR 0002).
+  - The numbers and the reasoning follow.
+- An integration project, `integration-no-isolate`, runs the container suite under
+  `isolate: false` with the same `maxWorkers` as the others. Unit tests pin the per-file
+  state and the cache deterministically, since which files share a worker is the pool's
+  choice.
+
+### Measurements
+
+[`0001-bench/measure-isolate.mjs`](0001-bench/measure-isolate.mjs)
+runs real Vitest over a generated suite through the repo's own container global setup.
+
+- **Schema:** the repo's schema padded to 73 tables in bench4's shape, and a `Tag`
+  Baseline of 2,000 rows.
+- **Import cost:** a client module shaped like `tests/db/client.ts`, plus 300 ms of
+  synchronous work at import standing in for an app's import graph.
+- **Suite:** 8 files per worker of 20 tests. Each test writes an Author with a Post, a row
+  into each of 8 other tables, and one `Tag` update.
+- **Variants:** three builds of `dist/`, generated by text patches at run time:
+  - `shipped`, as built;
+  - `baseline-only`, whose `afterAll` vacuums only Baseline tables (no job a);
+  - `none`, with no `afterAll` `VACUUM`.
+- **Runs:** W = 4 and 16, 3 interleaved rounds, on WSL2 with 20 cores.
+
+```
+pnpm build && pnpm generate
+node docs/adr/0001-bench/measure-isolate.mjs
+```
+
+The full run, medians over the rounds. Suite is first file start to last file end, in s;
+file is the setup file to the end of the `afterAll`. Reset 1 is the `beforeAll` Reset,
+Reset 2 the first `afterEach` one, later the rest, and late files the later Resets of each
+worker's last two files. All other columns are in ms.
+
+| W   | isolate | variant       | suite (rounds)            | file | Reset 1 | Reset 2 | later | late files | afterAll |
+| --- | ------- | ------------- | ------------------------- | ---- | ------- | ------- | ----- | ---------- | -------- |
+| 4   | true    | shipped       | 11.97 (11.93/11.97/12.13) | 1343 | 22.7    | 19.2    | 18.7  | 18.6       | 21.5     |
+| 4   | true    | baseline-only | 12.40 (12.40/12.66/10.34) | 1391 | 45.8    | 20.3    | 19.9  | 20.3       | 10.4     |
+| 4   | true    | none          | 10.53 (10.53/10.34/12.18) | 1388 | 47.5    | 24.7    | 20.4  | 21.2       | 0.1      |
+| 4   | false   | shipped       | 6.47 (6.47/6.44/6.51)     | 684  | 5.5     | 17.3    | 18.5  | 18.4       | 17.9     |
+| 4   | false   | baseline-only | 6.62 (6.62/6.50/6.74)     | 714  | 6.0     | 18.7    | 19.5  | 20.2       | 7.2      |
+| 4   | false   | none          | 6.62 (6.62/6.55/6.65)     | 717  | 5.6     | 21.5    | 20.2  | 20.9       | 0.0      |
+| 16  | true    | shipped       | 15.54 (16.15/14.85/15.54) | 1850 | 33.3    | 34.6    | 28.5  | 27.9       | 33.2     |
+| 16  | true    | baseline-only | 14.87 (14.87/14.70/18.06) | 1884 | 67.0    | 35.1    | 29.6  | 29.8       | 15.2     |
+| 16  | true    | none          | 18.19 (16.29/18.19/19.24) | 2144 | 71.5    | 48.0    | 35.9  | 44.3       | 0.1      |
+| 16  | false   | shipped       | 10.08 (10.08/9.40/10.08)  | 1036 | 7.7     | 28.2    | 29.1  | 30.1       | 28.1     |
+| 16  | false   | baseline-only | 9.50 (9.50/9.30/10.14)    | 1043 | 8.7     | 27.6    | 29.1  | 29.5       | 9.7      |
+| 16  | false   | none          | 10.96 (10.96/11.03/10.78) | 1265 | 8.8     | 37.1    | 36.0  | 43.9       | 0.0      |
+
+Between variants the suite times fall within the spread of the rounds (one
+`baseline-only` round at W = 4 took 10.34 s). The per-hook columns are the clean signal.
+
+**The saving**, `shipped` in both modes:
+
+| W   | Suite, `isolate: true` → `false` | Per file       | First Reset of a file |
+| --- | -------------------------------- | -------------- | --------------------- |
+| 4   | 11.97 → 6.47 s (−46 %)           | 1343 → 684 ms  | 22.7 → 5.5 ms         |
+| 16  | 15.54 → 10.08 s (−35 %)          | 1850 → 1036 ms | 33.3 → 7.7 ms         |
+
+Most of it is the import and collection a file no longer repeats. The rest is the
+`beforeAll` Reset landing on a warm backend.
+
+**The `VACUUM` between files, per job.** All values are medians, in ms:
+
+| W   | isolate | Job (a): first Reset, with → without | Job (a): its `afterAll` cost | Job (b): late files' Resets, with → without | Job (b): its `afterAll` cost |
+| --- | ------- | ------------------------------------ | ---------------------------- | ------------------------------------------- | ---------------------------- |
+| 4   | true    | 22.7 → 45.8                          | 11.1                         | 20.3 → 21.2                                 | 10.3                         |
+| 4   | false   | 5.5 → 6.0                            | 10.7                         | 20.2 → 20.9                                 | 7.2                          |
+| 16  | true    | 33.3 → 67.0                          | 18.0                         | 29.8 → 44.3                                 | 15.1                         |
+| 16  | false   | 7.7 → 8.7                            | 18.4                         | 29.5 → 43.9                                 | 9.7                          |
+
+- **Job (b) pays in both modes**, as ADR 0002 predicted. `isolate: false` does nothing
+  about the dead rows a restore leaves. Without it, the Resets of a worker's last files
+  drift from about 30 to about 44 ms at W = 16.
+- **Job (a) pays under `isolate: true`** (net about −12 and −16 ms per file). Under
+  `isolate: false` this benchmark shows no benefit for its 11–18 ms. It is kept anyway:
+  - That result comes from the benchmark, not from the mode. Its files take about 1 s, so
+    no pool backend ever idles out. In a real suite they do: `pg` closes an idle
+    connection after 10 s by default, files have long stretches with no database work, and
+    pools are wider than the tests' concurrency. A backend that reconnects onto dirty
+    heaps pays the cold Reset of before amendment 2 (about 90 ms at 73 tables) instead of
+    about 25. Job (a) is the insurance, and 11–18 ms per file (1.5–2 % of a file) is its
+    premium.
+  - Skipping it would need a mode heuristic ("this module already served a file"),
+    threaded through the opt-in state into `database.ts` and a second probe variant, and
+    would add a documented "the first file on a worker behaves differently". For 2 %, the
+    project keeps one code path for both modes.
+
+**Amendment 2's "Looking ahead"** asked whether the storage probe stays on under
+`isolate: false`. It does, by arithmetic rather than a new measurement:
+
+- On a warm backend the probe costs +1.7–1.9 ms per Reset.
+- On the 1,900-test, 20-worker suite that motivated #17, that is about 3.4 s of server
+  time spread over 20 workers, about 0.2 s of wall time.
+- That is against the 35–46 % of suite time the opt-in itself saves.
+- The idle-backend argument above applies to the probe too.
+
+Not pursued.

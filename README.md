@@ -1,6 +1,6 @@
 # @flefebvre/prisma-test-helper
 
-Fast, isolated Postgres for Prisma + Vitest tests: a real database per worker, an empty
+Fast, isolated Postgres for Prisma + Vitest tests: a real database per worker, a clean
 database for every test, zero cleanup code.
 
 [![npm version](https://img.shields.io/npm/v/%40flefebvre%2Fprisma-test-helper)](https://www.npmjs.com/package/@flefebvre/prisma-test-helper)
@@ -37,7 +37,11 @@ test("starts from a clean database — the author above is gone", async () => {
 ```
 
 - **No cleanup code.** Every test starts from an empty database with its sequences
-  rewound — no truncation of your own, no ordering constraints, no leftover rows.
+  rewound — no truncation of your own, no ordering constraints, no leftover rows. Rows
+  your migrations insert, such as lookup tables, are the exception: every test starts
+  with them, restored after any test that changed them. So are the rows of the
+  reference-data seed you can hand global setup: your project's own seed function, not
+  `prisma db seed`.
 - **Real commits.** Nothing is wrapped or faked: `$transaction` behaves as in production,
   and a second client, a queue worker, or a deferred constraint sees exactly what it
   would there.
@@ -46,10 +50,12 @@ test("starts from a clean database — the author above is gone", async () => {
 - **Parallel by default.** One database per Vitest worker slot, so files running in
   parallel cannot see each other's writes.
 - **Nothing to tear down.** The container is removed when the run ends, including after a
-  crash.
+  crash. In url mode the run drops its databases, and the next run drops those a killed
+  run left.
 
-**Postgres-only.** The harness starts a real Postgres in Docker and relies on
-`CREATE DATABASE … TEMPLATE` for cloning; no other database is supported.
+**Postgres-only.** The harness starts a real Postgres in Docker, or uses one you point it
+at, and relies on `CREATE DATABASE … TEMPLATE` for cloning; no other database is
+supported.
 
 ## How it works
 
@@ -58,15 +64,20 @@ One run of your test suite goes through this lifecycle:
 1. Vitest's global setup starts one tuned throwaway Postgres container (tmpfs data
    directory, `fsync=off`) through [Testcontainers](https://testcontainers.com/).
 2. Your project's own `prisma migrate deploy` runs once against a **Template Database**
-   inside that container.
+   inside that container, followed by your own seed function if you configured one. The
+   tables they leave rows in form the **Baseline**, which the harness snapshots there.
 3. Before any worker forks, one **Worker Database** per Vitest worker slot is cloned from
    the template (`<databaseName>_1..N`) with `CREATE DATABASE … TEMPLATE` — a fast
    file-level copy.
 4. Each worker points `DATABASE_URL` at its own clone. Tests commit to it for real.
 5. Before a file's first test, and after every test, the **Reset** empties that clone
    again: one `DO` block, sent through your own Prisma client, that empties every table
-   and rewinds every sequence in a single statement.
+   and rewinds every sequence in a single statement — restoring, instead of emptying,
+   any Baseline table the test wrote to.
 6. The container is removed when the run ends.
+
+Already running Postgres? Pass a [`url`](docs/api.md#the-url-option) and the same
+lifecycle runs on that server, under database names unique to the run, with no container.
 
 Migrations run once, clones are cheap, and the Reset is one planned statement — so the
 per-test overhead is a few milliseconds (about 7 ms at 73 tables, 10 ms with 20 workers
@@ -76,14 +87,17 @@ resetting at once), nearly flat in the size of your schema. Why `DELETE` and not
 
 ## Requirements
 
-- **Node ^22.12, ^24 or >= 26**, as Vitest 5 requires. The package ships ESM only, but
-  your project need not be — the wiring runs under Vitest, which transforms modules
-  through Vite, so a CommonJS project (a stock Next.js app, say) works too.
-- **Docker** (or another container runtime Testcontainers can reach).
+- **Node ^22.22, ^24 or >= 26**, as Vitest 5 and Testcontainers require. The package
+  ships ESM only, but your project need not be — the wiring runs under Vitest, which
+  transforms modules through Vite, so a CommonJS project (a stock Next.js app, say) works
+  too.
+- **Docker** (or another container runtime Testcontainers can reach), or an existing
+  Postgres 13+ server you point the run at with the
+  [`url` option](docs/api.md#the-url-option) or `PRISMA_TEST_HELPER_URL`.
 - Peer dependencies: **Vitest ^5.0.3** and **Prisma ^7**, with your migrations committed
   (`prisma migrate deploy` is what the harness runs).
 - A Postgres superuser for the Reset. The container's user is one, so there is nothing to
-  do.
+  do; in url mode, the URL's role must be one.
 - Testcontainers comes with this package; do not add it yourself. Under pnpm, none of
   its build scripts needs approving.
 
@@ -146,10 +160,19 @@ test("persists an author", async () => {
 });
 ```
 
+`isolate: true` is Vitest's default and the one these docs prescribe: every test file
+gets fresh modules. `isolate: false` is supported too. Each worker then keeps your
+app's modules and Prisma client across files, while every file still gets its own opt-in
+and a clean Worker Database. On a generated 73-table suite with a 300 ms app import, it
+cut the run by 46 % at 4 workers and 35 % at 16. The trade-offs: module state and
+`vi.mock` calls leak between files on a worker, Reset Hooks registered in a test file
+carry over, and schema changes outside migrations go unseen. See
+[`isolate: false`](docs/setup.md#isolate-false).
+
 ## Documentation
 
-- [Setup](docs/setup.md): the five files, merging into existing configs, `projects`,
-  path aliases, `server-only`, and a smoke test.
+- [Setup](docs/setup.md): the five files, merging into existing configs,
+  `isolate: false`, `projects`, path aliases, `server-only`, and a smoke test.
 - [Writing tests](docs/writing-tests.md): the `setupDatabase(db)` opt-in, where test
   data belongs, hooks and the Reset, locks, and Reset Hooks for fixtures.
 - [API](docs/api.md): every export, its options, and its entry point.
@@ -188,9 +211,10 @@ documents.
 git clone https://github.com/flolefebvre/prisma-test-helper.git
 cd prisma-test-helper
 pnpm install
-pnpm run generate      # generate the fixture Prisma client
-pnpm test              # unit + integration (integration needs Docker)
-pnpm run gate          # everything CI runs: typecheck, lint, duplication, tests, build
+pnpm run generate             # generate the fixture Prisma client
+pnpm test                     # every vitest project (all but unit need Docker)
+pnpm run gate                 # typecheck, lint, duplication, tests, build
+pnpm run test:url-concurrent  # not in the gate, but in CI: concurrent url-mode runs
 ```
 
 ## License

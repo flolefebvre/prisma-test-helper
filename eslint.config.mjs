@@ -8,7 +8,7 @@ export default defineConfig([
   // own config, which ESLint would otherwise pick up) are never linted.
   globalIgnores(["dist", "node_modules", "coverage", "tests/generated", ".claude/worktrees"]),
   {
-    files: ["src/**/*.ts", "tests/**/*.ts"],
+    files: ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"],
     extends: [tseslint.configs.recommended],
   },
 ]);

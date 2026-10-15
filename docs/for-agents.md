@@ -14,10 +14,15 @@ run; migrations applied once to a **Template Database**; one **Worker Database**
 from it per Vitest worker slot. Tests commit to their Worker Database for real, through
 the app's own Prisma client, with nothing mocked. The **Reset** empties every table and
 rewinds every sequence in one statement, before a file's first test and after every test,
-so each test starts from an empty database. A file opts in with `setupDatabase(db)`;
+so each test starts from an empty database, except for the rows the migrations insert,
+and those the global setup's `seed` option (the project's own reference-data seed
+function) inserts: those tables form the **Baseline**, which the Reset restores whenever
+a test wrote to them (partitioned ones after every test). A file opts in with `setupDatabase(db)`;
 **Reset Hooks** registered with `registerResetHook` run in every `beforeEach` and receive
 `{ testName, seed }`, the seam for the project's own factories. The design rationale is
-[ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
+[ADR 0001](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md),
+and for the Baseline
+[ADR 0002](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0002-baseline-restore.md).
 
 ## Import map
 
@@ -47,8 +52,12 @@ signatures: [API](api.md).
 4. **Finish what a test opens before it ends.** Await every query and end every
    transaction a second client opened; the Reset waits at most 5 seconds for a lock,
    then fails the test.
-5. **Leave `pool: "forks"` and `isolate: true` alone.** Together they re-run `setupFiles`
-   in a fresh process per test file; widening either breaks isolation silently.
+5. **Leave `pool: "forks"` and the project's `isolate` setting alone.** `isolate: true`,
+   the default, gives every test file fresh modules. `isolate: false` is a supported
+   mode: keep it where the project chose it, and do not switch modes on your own. Under
+   it, module state, `vi.mock` calls and Reset Hooks registered in a test file carry over
+   to later files on the worker, and DDL outside the migrations breaks later files'
+   Resets: see [`isolate: false`](setup.md#isolate-false).
 6. **Keep the setup file free of static app imports.** It calls `setupWorkerDatabase()`
    first; the app's client must be built from `DATABASE_URL` after that call. Reach app
    modules from it with a dynamic `import()` only; library imports are safe.
@@ -64,9 +73,9 @@ Each step links the section of [Setup](setup.md) that holds its code and its mer
 for files that already exist.
 
 1. **Preflight.** Confirm `prisma` and `@prisma/client` ^7, `vitest` ^5.0.3, Node
-   ^22.12, ^24 or >= 26, committed migrations, and `docker info`. Report every failing
-   requirement before touching a file; on too-old versions, stop. A CommonJS project is
-   fine. See [Before you start](setup.md#before-you-start).
+   ^22.22, ^24 or >= 26, committed migrations, and `docker info` (or a server for url
+   mode). Report every failing requirement before touching a file; on too-old versions,
+   stop. A CommonJS project is fine. See [Before you start](setup.md#before-you-start).
 2. **Install** `@flefebvre/prisma-test-helper` as a dev dependency with the package
    manager the lockfile names. Never add `testcontainers` yourself. Under pnpm, mark
    `cpu-features`, `ssh2` and `protobufjs` as not to be built, with the entries in
@@ -82,15 +91,17 @@ for files that already exist.
 4. **Write or merge `prisma.config.ts`** so `datasource.url` reads `DATABASE_URL`. See
    [Prisma config](setup.md#1-prisma-config).
 5. **Write the global-setup file**, pinning `image` from the project's compose file when
-   it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. See
-   [Global setup](setup.md#3-global-setup).
+   it names Postgres; otherwise tell the user it defaults to `postgres:18-alpine`. If the
+   project seeds reference data its tests need (`migrations.seed` in
+   `prisma.config.ts`), pass a `seed` that calls the reference-data function, not the
+   whole script. See [Global setup](setup.md#3-global-setup).
 6. **Write or merge the setup file**, calling `setupWorkerDatabase()` first with no static
    app imports. If the app turns on TLS from an environment variable, override it right
    after: see [TLS](setup.md#tls). See [Per-worker setup](setup.md#4-per-worker-setup).
-7. **Merge the Vitest config**: the four settings, on the database project when there are
-   `projects`, plus alias resolution and the `server-only` alias when the project needs
-   them. If it set `pool: "threads"` or `isolate: false`, correct it and tell the user
-   why. See [Vitest config](setup.md#5-vitest-config).
+7. **Merge the Vitest config**: the four settings (an existing `isolate` keeps its value),
+   on the database project when there are `projects`, plus alias resolution and the
+   `server-only` alias when the project needs them. If it set `pool: "threads"`, correct it and tell the user why; an existing
+   `isolate: false` stays. See [Vitest config](setup.md#5-vitest-config).
 8. **Prove it works** with the two-test smoke test against a real model, and run the
    suite twice; both runs must pass with the second test genuinely running. On failure,
    match the error in [Troubleshooting](troubleshooting.md). See
@@ -106,11 +117,11 @@ for files that already exist.
 
 ## By task
 
-| Task                                           | Read                                                                                           | Done when                                                                                                                                        |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Wire the harness into a project                | [Setup](setup.md)                                                                              | The smoke test passes on two consecutive runs, and the project's `AGENTS.md` points here                                                         |
-| Write or edit a test that touches the DB       | [Writing tests](writing-tests.md)                                                              | The file calls `setupDatabase(db)` once at the top; no cleanup code; per-test data built in the test, `beforeEach` or a factory; it passes twice |
-| Write a fixture or test-data helper            | [Fixtures and seeded fake data](writing-tests.md#fixtures-and-seeded-fake-data), [API](api.md) | Seeded from the Reset Hook's `seed`; the helper fails loudly via `isDatabaseSetUp()` when the file did not opt in                                |
-| Fix an error from the harness                  | [Troubleshooting](troubleshooting.md)                                                          | The error's own row is resolved at the step it points to, and the suite passes                                                                   |
-| Change the wiring (image, `projects`, aliases) | [Setup](setup.md), [API](api.md#createglobalsetupoptions)                                      | The smoke test, or the existing suite, still passes twice; `pool: "forks"` and `isolate: true` are untouched                                     |
-| Upgrade across a major version                 | [Migrating](migrating.md)                                                                      | Every step in the section for the jump is applied, no import of a removed export remains, and the suite passes twice                             |
+| Task                                                  | Read                                                                                           | Done when                                                                                                                                        |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Wire the harness into a project                       | [Setup](setup.md)                                                                              | The smoke test passes on two consecutive runs, and the project's `AGENTS.md` points here                                                         |
+| Write or edit a test that touches the DB              | [Writing tests](writing-tests.md)                                                              | The file calls `setupDatabase(db)` once at the top; no cleanup code; per-test data built in the test, `beforeEach` or a factory; it passes twice |
+| Write a fixture or test-data helper                   | [Fixtures and seeded fake data](writing-tests.md#fixtures-and-seeded-fake-data), [API](api.md) | Seeded from the Reset Hook's `seed`; the helper fails loudly via `isDatabaseSetUp()` when the file did not opt in                                |
+| Fix an error from the harness                         | [Troubleshooting](troubleshooting.md)                                                          | The error's own row is resolved at the step it points to, and the suite passes                                                                   |
+| Change the wiring (image, `url`, `projects`, aliases) | [Setup](setup.md), [API](api.md#createglobalsetupoptions)                                      | The smoke test, or the existing suite, still passes twice; `pool: "forks"` and the `isolate` setting are untouched                               |
+| Upgrade across a major version                        | [Migrating](migrating.md)                                                                      | Every step in the section for the jump is applied, no import of a removed export remains, and the suite passes twice                             |

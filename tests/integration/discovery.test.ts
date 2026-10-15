@@ -1,6 +1,11 @@
-import { afterAll, beforeAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, inject, test } from "vitest";
 
-import { DISCOVERY_QUERY, prepareReset, type DiscoveredRelation } from "../../src/reset.js";
+import {
+  clearResetCache,
+  DISCOVERY_QUERY,
+  prepareReset,
+  type DiscoveredRelation,
+} from "../../src/reset.js";
 import { db } from "../db/client.js";
 
 // The discovery query and the Reset against shapes the fixture schema does not carry:
@@ -13,6 +18,14 @@ import { db } from "../db/client.js";
 // fixture exists, so discovery sees it. Files sharing this Worker Database run one at a
 // time and each opens with a Reset, so the fixture is invisible to them as long as it is
 // dropped here.
+//
+// The fixture is DDL run mid-run, which the Reset's discovery cache does not expect: it
+// keeps one discovery per Worker Database for as long as `src/reset.ts` lives — every
+// file a worker runs, under `isolate: false`. So the cache is cleared once the fixture
+// exists, or this file's Reset would come from an earlier file's discovery and miss it,
+// and again once it is dropped, or later files on this worker would get a Reset naming
+// tables that no longer exist. A consumer has no such hook: under `isolate: false`
+// schema changes belong in the migrations.
 
 const SCHEMA = '"Reset Fixture"';
 const ODD = `${SCHEMA}."it's ""odd"""`;
@@ -39,11 +52,13 @@ const TEARDOWN = [
 
 beforeAll(async () => {
   for (const statement of FIXTURE) await db.$executeRawUnsafe(statement);
+  clearResetCache();
 });
 
 afterAll(async () => {
   // Every step runs even if an earlier one fails, so a half-built fixture still goes.
   for (const statement of TEARDOWN) await db.$executeRawUnsafe(statement).catch(() => {});
+  clearResetCache();
 });
 
 const query = <T>(sql: string) => db.$queryRawUnsafe<T[]>(sql);
@@ -76,7 +91,11 @@ test("the Reset empties every discovered table and rewinds every owned sequence"
   await query(`SELECT nextval('${SCHEMA}.standalone')`);
 
   // Act
-  const { reset } = await prepareReset(db, process.env.DATABASE_URL!, "prisma_test");
+  const { reset } = await prepareReset(
+    db,
+    process.env.DATABASE_URL!,
+    inject("templateDatabaseName"),
+  );
   await reset();
 
   // Assert: empty, partitions included, and the next ids start over.

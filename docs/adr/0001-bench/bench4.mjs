@@ -1,8 +1,8 @@
 // Benchmark behind amendment 2 in docs/adr/0001-commit-and-reset-instead-of-rollback.md
 // (issue #17): what the first Reset on a fresh Postgres backend costs, and whether gating
 // each table's DELETE on its heap file being nonzero — plus a VACUUM between files that
-// returns heaps to 0 bytes — makes a test file cheaper. Grown from the review's scratch
-// scripts in docs/plans/0017-cold-reset/.
+// returns heaps to 0 bytes — makes a test file cheaper. Grown from the scratch scripts
+// of the review of #17.
 //
 // Same container as bench.mjs (see its header), but `postgres:18-alpine`, and the same
 // scratch directory with only `pg` installed. `shipped` is built by dist/reset.js, so

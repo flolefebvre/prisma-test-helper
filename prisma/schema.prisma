@@ -1,5 +1,8 @@
 // Fixture schema for this repo's own tests: the smallest shape that exercises a
-// migration and a required relation. It never ships — `files` whitelists `dist/`.
+// migration, a required relation, and a Baseline — `Category`, whose rows a migration
+// inserts (so does the raw-SQL partitioned table `Reading`, which Prisma does not model),
+// and `Tag`, whose rows the global setup's `seed` inserts.
+// It never ships — `files` whitelists `dist/`.
 
 generator client {
   provider = "prisma-client"
@@ -17,8 +20,23 @@ model Author {
 }
 
 model Post {
-  id       Int    @id @default(autoincrement())
-  title    String
-  author   Author @relation(fields: [authorId], references: [id])
-  authorId Int
+  id         Int       @id @default(autoincrement())
+  title      String
+  author     Author    @relation(fields: [authorId], references: [id])
+  authorId   Int
+  category   Category? @relation(fields: [categoryId], references: [id])
+  categoryId Int?
+}
+
+model Category {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  posts Post[]
+}
+
+// Created empty by a migration and filled by the `seed` of `tests/global-setup.ts`: the
+// Baseline table the seed feeds.
+model Tag {
+  id   Int    @id @default(autoincrement())
+  name String @unique
 }

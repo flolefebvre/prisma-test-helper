@@ -14,12 +14,14 @@ Confirm every requirement before touching a file:
 
 - `prisma` and `@prisma/client` at **^7**, `vitest` at **^5.0.3**. On older versions,
   upgrade first; the harness does not support them.
-- Node **^22.12, ^24 or >= 26**, as Vitest 5 requires (check `engines`, `.nvmrc`, or
-  `node -v`).
+- Node **^22.22, ^24 or >= 26**, as Vitest 5 and Testcontainers require (check `engines`,
+  `.nvmrc`, or `node -v`).
 - Committed migrations under the schema's migrations directory. The harness runs
   `prisma migrate deploy`, so a project with no migration files has nothing to apply.
 - Docker reachable: `docker info`. Without it the wiring can still be written, but the
-  check in [step 6](#6-prove-it-works) cannot run until Docker is started.
+  check in [step 6](#6-prove-it-works) cannot run until Docker is started. A run pointed
+  at an existing Postgres server needs no Docker: see
+  [Running against an existing server](#running-against-an-existing-server).
 - A Postgres superuser. The Reset sets `session_replication_role` and reads `pg_stat_file`
   and `pg_stat_activity`, which need one. The container the harness starts connects as
   its superuser, so there is nothing to do. The harness needs this of any server it runs
@@ -210,12 +212,109 @@ No compose file, or no Postgres service in it → leave the call bare. It defaul
 `postgres:18-alpine`; pass `image` if production runs another major. Every option is in
 the [API reference](api.md#createglobalsetupoptions).
 
+**Feed reference data your project seeds outside its migrations.** Look for the project's
+seed: the script `migrations.seed` names in `prisma.config.ts`, and the function that
+script calls to insert reference data such as plans, roles or countries. Found one, and
+tests need those rows → pass a `seed` that builds its own client from the URL it
+receives, calls that function, and disconnects:
+
+```ts
+export default createGlobalSetup({
+  seed: async (databaseUrl) => {
+    const db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+    try {
+      await seedReferenceData(db);
+    } finally {
+      await db.$disconnect();
+    }
+  },
+});
+```
+
+Call the reference-data function, not the whole seed script: every table the seed fills
+becomes a Baseline table that every test starts with, demo data included. Build this
+client here; do not import the client module from step 2, which reads `DATABASE_URL`
+before any worker has one. No seed, or reference data that only migrations insert → leave
+`seed` out. Details: [The `seed` option](api.md#the-seed-option).
+
 This file must be inside `tsconfig.json`'s `include`. It carries the module augmentation
 that types `inject("templateDatabaseUri")`; outside the TypeScript program, that call
 will not typecheck.
 
 **Done when:** the file exists, exports the setup as `default`, pins the image when a
-compose file names one, and is inside the TypeScript program.
+compose file names one, passes a `seed` when the project seeds reference data its tests
+need, and is inside the TypeScript program.
+
+### Running against an existing server
+
+By default every run starts its own container. To use a Postgres server that is already
+running instead (your development server, a server several checkouts share, or a CI
+service container), pass its URL:
+
+```ts
+export default createGlobalSetup({ url: process.env.TEST_DATABASE_SERVER_URL });
+```
+
+Or leave the config alone and set `PRISMA_TEST_HELPER_URL` on the machine that should use
+a server: when non-empty it overrides `url`, and any `image` or `postgresSettings` in the
+config is ignored, with one line on stderr. If the config pins `image` (step 3), use the
+variable: `url` and `image` together fail the run. Details:
+[The `url` option](api.md#the-url-option).
+
+Requirements, checked when the run starts, before any database is created:
+
+- **A superuser role.** The URL's role must be a Postgres superuser: the Reset sets
+  `session_replication_role` and reads `pg_stat_file`. A role that is not fails the run,
+  naming the role.
+- **Postgres 13 or later.** Teardown drops the run's databases with
+  `DROP DATABASE … WITH (FORCE)`, which Postgres 13 introduced.
+- **A `postgres` database.** Every run holds a lock in the server's `postgres` database for
+  as long as it lives, whatever database the URL names, and cleans up after killed runs
+  from there (see below). Postgres ships that database by default, managed services too.
+- **Reachable from the test process.** The global setup and every worker connect to it
+  directly, from the machine running Vitest.
+- **TLS in the URL.** The harness connects without TLS unless the URL sets `sslmode`; it
+  ignores `PGSSLMODE`. For a server that requires TLS, add `?sslmode=require` (or
+  stricter) to the URL. The template and Worker Database URLs keep it.
+
+Trade-off: the container's tuning (a tmpfs data directory, `fsync=off`,
+`synchronous_commit=off`, `full_page_writes=off`) does not apply. The server's own
+settings decide how fast migrate, the clones and every test write run, and a durable
+server is slower than the throwaway container. If Resets fail with `Hook timed out`, raise
+`hookTimeout` in the Vitest config (`hookTimeout: 30_000`, for instance).
+
+Each run creates `<databaseName>_<run id>` and its Worker Databases, and drops them when it
+ends, so runs sharing a server never collide.
+
+**Killed runs.** A run that is killed before its teardown (Ctrl-C twice, out of memory, a
+cancelled CI job) leaves its databases on the server. The next run on that server drops
+them when it starts:
+
+- **What is marked.** Every database a run creates, its template and each Worker Database,
+  carries the comment `prisma-test-helper run <run id>` (`COMMENT ON DATABASE`). Only
+  databases with that comment are ever cleaned up. A database without it is never
+  touched, even one named like a harness database.
+- **How a dead run is told from a live one.** While it runs, each run holds a Postgres
+  advisory lock keyed by its run id, on a connection to the server's `postgres` database.
+  Postgres releases that lock as soon as the run's connection ends, however the run
+  ended. At startup, before creating anything, a run lists the marked databases and tries
+  the lock of each run that marked them. If it gets the lock, that run is dead, and its
+  databases are dropped with `DROP DATABASE … WITH (FORCE)`. If not, that run is still
+  going, and its databases are left alone, so concurrent runs are safe.
+- **What it prints.** One line on stderr names the databases it dropped:
+  `dropped databases left on <url> by a run that was killed: …`. A database it cannot
+  drop does not fail the run; a second line names it, for you to drop by hand.
+
+To list what killed runs left on a server by hand:
+
+```sql
+SELECT datname, shobj_description(oid, 'pg_database')
+FROM pg_database
+WHERE shobj_description(oid, 'pg_database') LIKE 'prisma-test-helper run %';
+```
+
+Drop a database it lists only once no run with that id is going any more:
+`DROP DATABASE "<name>" WITH (FORCE)`.
 
 ## 4. Per-worker setup
 
@@ -244,11 +343,12 @@ time.
 
 ### TLS
 
-The container speaks plaintext. If your app turns on TLS whenever a variable is set (an
-SSL mode, a CA path), every database test fails with
-`The server does not support SSL connections`. Set the variable your app checks to its
-off value, below `setupWorkerDatabase()` (for a CA path, the empty string). For `pg`'s
-own `PGSSLMODE`:
+The container speaks plaintext. (In url mode against a server that requires TLS, skip
+this section: the Worker Database URL already carries the URL's `sslmode`.) If your app
+turns on TLS whenever a variable is set (an SSL mode, a CA path), every database test
+fails with `The server does not support SSL connections`. Set the variable your app
+checks to its off value, below `setupWorkerDatabase()` (for a CA path, the empty string).
+For `pg`'s own `PGSSLMODE`:
 
 ```ts
 setupWorkerDatabase();
@@ -256,8 +356,8 @@ process.env.PGSSLMODE = "disable";
 ```
 
 Assign rather than delete: a loader like dotenv leaves a variable that is already set
-alone, but would put a deleted one back from your `.env`. The setup file runs in each test
-file's own process, so this touches nothing outside the test run.
+alone, but would put a deleted one back from your `.env`. The setup file runs inside the
+test workers, so this touches nothing outside the test run.
 
 **Done when:** the file calls `setupWorkerDatabase()` first, the only static imports in
 it are library ones, and it sets any variable that turns on TLS to its off value.
@@ -272,8 +372,8 @@ export default defineConfig({
   test: {
     globalSetup: ["tests/global-setup.ts"],
     setupFiles: ["tests/setup.ts"],
-    // Both are Vitest defaults, set explicitly because the harness depends on them:
-    // together they re-run `setupFiles` in a fresh process per test file.
+    // Both are Vitest defaults, set explicitly: `pool: "forks"` is required, and
+    // `isolate: true` gives every test file fresh modules (see "isolate: false" below).
     pool: "forks",
     isolate: true,
   },
@@ -281,14 +381,45 @@ export default defineConfig({
 ```
 
 **A config already exists** → merge, preserving every existing key. Add the four
-settings above, appending to `globalSetup` and `setupFiles` if they already hold entries.
-`tests/setup.ts` must come first in `setupFiles`, so `DATABASE_URL` is set before any
-other setup file loads your app.
+settings above (an `isolate` the config already sets keeps its value), appending to
+`globalSetup` and `setupFiles` if they already hold entries. `tests/setup.ts` must come
+first in `setupFiles`, so `DATABASE_URL` is set before any other setup file loads your
+app.
 
-`pool: "forks"` and `isolate: true` are load-bearing. Under `isolate: false` module state
-leaks across files, and the `setupDatabase(db)` opt-in guard relies on its module
-re-instantiating per file. If an existing config sets `pool: "threads"` or
-`isolate: false`, correct them.
+`pool: "forks"` is load-bearing: if an existing config sets `pool: "threads"`, correct it.
+`isolate: true` is the default the harness is documented and tuned for. An existing
+`isolate: false` is supported: keep it if the project chose it, and read the next section.
+
+### `isolate: false`
+
+Under `isolate: false` each worker keeps its modules across the test files it runs: your
+app's import graph is loaded once per worker instead of once per file, and your Prisma
+client and its connection pool are reused. The harness supports it. Every file still
+runs `tests/setup.ts` first and starts from a clean Worker Database, each file's
+`setupDatabase(db)` opt-in belongs to that file alone, and the Reset is built once per
+worker instead of once per file.
+
+What it saves, measured on a generated suite of 73 tables, 8 files per worker of 20 tests,
+and an app import costing about 300 ms: **46 % of the run at 4 workers (12.0 → 6.5 s) and
+35 % at 16 (15.5 → 10.1 s)**. Most of it is the import a file no longer repeats; the
+rest, a first Reset per file on a connection that is already warm. The bigger your import
+graph, the more it saves. Numbers and method:
+[ADR 0001, amendment 3](https://github.com/flolefebvre/prisma-test-helper/blob/main/docs/adr/0001-commit-and-reset-instead-of-rollback.md).
+
+What it costs, all of it Vitest's own behaviour, not the harness's:
+
+- **Module state leaks between files on a worker.** A module-level variable, a cache or a
+  singleton one file changes is what the next file sees. So is a `vi.mock` a file
+  registers: restore mocks in the file that made them, or keep mocked files on
+  `isolate: true` in their own project.
+- **Reset Hooks carry over.** A hook a factory module registers at import is registered
+  once per worker, which is what you want. A hook registered inside one test file's body
+  keeps running for every later file on that worker.
+- **Schema changes outside your migrations are not seen.** The Reset is built from the
+  schema once per worker. A table a test creates is not emptied by later files' Resets on
+  that worker, and a table a test drops makes their Reset fail with
+  `relation … does not exist`. Keep schema changes in migrations, or run such files on
+  `isolate: true`.
 
 ### Projects
 
@@ -335,8 +466,9 @@ export default defineConfig({
 The file path is deliberate: `server-only` exposes only `.` in its `exports` map, so the
 subpath specifier `server-only/empty.js` does not resolve.
 
-**Done when:** a single Vitest config carries all four settings alongside its original
-contents, its paths match the files from steps 3 and 4, and aliased imports resolve.
+**Done when:** a single Vitest config carries all four settings (`isolate` as the project
+had it, `true` otherwise) alongside its original contents, its paths match the files from
+steps 3 and 4, and aliased imports resolve.
 
 ## 6. Prove it works
 
