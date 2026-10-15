@@ -280,7 +280,8 @@ Requirements, checked when the run starts, before any database is created:
 Trade-off: the container's tuning (a tmpfs data directory, `fsync=off`,
 `synchronous_commit=off`, `full_page_writes=off`) does not apply. The server's own
 settings decide how fast migrate, the clones and every test write run, and a durable
-server is slower than the throwaway container.
+server is slower than the throwaway container. If Resets fail with `Hook timed out`, raise
+`hookTimeout` in the Vitest config (`hookTimeout: 30_000`, for instance).
 
 Each run creates `<databaseName>_<run id>` and its Worker Databases, and drops them when it
 ends, so runs sharing a server never collide.

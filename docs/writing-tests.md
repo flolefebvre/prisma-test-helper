@@ -98,6 +98,7 @@ test:
 - `onTestFinished` callbacks run **after** the Reset. They may read the (reset) database,
   but rows they write survive into the next test, so keep database writes in
   `afterEach`.
+- A Reset that fails or outlasts `hookTimeout`: see [Troubleshooting](troubleshooting.md#errors-from-this-package).
 
 ## Finish what a test opens
 
