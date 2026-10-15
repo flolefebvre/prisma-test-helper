@@ -32,6 +32,11 @@ Prisma client your app uses. It registers:
   the next file's Resets stay cheap. That `VACUUM` is best effort: it never fails the
   file.
 
+A Reset that fails, or outlasts Vitest's `hookTimeout`, fails the test it ran after. One
+still running is waited for by the next `beforeEach` (or the `afterAll`); one that failed
+fails the next test too, with its error, since that test's database was not emptied.
+Raise `hookTimeout` if Resets time out: see [Troubleshooting](troubleshooting.md).
+
 The Reset empties every table but the Baseline tables, the ones your migrations or the
 global-setup [`seed`](#the-seed-option) left rows in, which it restores when a test wrote
 to them: see

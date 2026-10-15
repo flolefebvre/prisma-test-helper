@@ -82,6 +82,11 @@ export function registerResetHook(hook: ResetHook): void {
  * table, which keeps the next file's Resets cheap; it is best effort and never fails the
  * file.
  *
+ * A Reset that fails, or outlasts Vitest's `hookTimeout`, fails the test it ran after. One
+ * still running is waited for by the next `beforeEach` (or the `afterAll`); one that
+ * failed fails the next test too, with its error, since that test's database was not
+ * emptied. Raise `hookTimeout` if Resets time out.
+ *
  * It refuses — synchronously, before registering anything — unless `DATABASE_URL` names
  * a Worker Database: with real commits, a misrouted suite would empty a real database.
  * The `beforeAll` also checks that `db` is connected to that same database before the
@@ -136,13 +141,41 @@ export function registerDatabase(
   markOptedIn();
 
   let prepared: PreparedReset | undefined;
+  // The Reset work started last. When Vitest times a hook out it moves on, but the
+  // hook's SQL keeps running: the next hook waits for it before going on.
+  let inFlight: Promise<void> | undefined;
+
+  // Starts `work` once the previous Reset settles, whatever its outcome, so two Resets
+  // never overlap. Every promise here is awaited by a hook, so none rejects unhandled.
+  const startReset = (work: () => Promise<void>): Promise<void> => {
+    const previous = inFlight ?? Promise.resolve();
+    const run = () => work();
+    inFlight = previous.then(run, run);
+    return inFlight;
+  };
 
   beforeAll(async () => {
-    prepared = await prepareReset(db, databaseUrl, templateName);
-    await prepared.reset();
+    await startReset(async () => {
+      prepared = await prepareReset(db, databaseUrl, templateName);
+      await prepared.reset();
+    });
   });
 
   beforeEach(async () => {
+    // A Reset still running is one whose hook timed out: wait for it. A failed Reset also
+    // fails the test after it, whose database it did not empty; cleared so it fails only
+    // that one.
+    const pending = inFlight;
+    const failure = await pending?.then(
+      () => undefined,
+      (error: unknown) => ({ error }),
+    );
+    // Replaced only by an `afterEach` or `afterAll`, which run once Vitest has moved past
+    // this test: this hook timed out, so it leaves the state and the hooks to the live one.
+    if (inFlight !== pending) return;
+    inFlight = undefined;
+    if (failure) throw failure.error;
+
     const testName = expect.getState().currentTestName ?? "";
     const seed = hashName(testName);
     // Sequential, not Promise.all: hooks reset shared per-test state, and the order they
@@ -152,11 +185,16 @@ export function registerDatabase(
 
   afterEach(async () => {
     // Unset only when the `beforeAll` failed — which Vitest has already reported, and
-    // which skipped every test, so there is nothing to reset.
-    await prepared?.reset();
+    // which skipped every test, so there is nothing to reset. Read when the Reset starts.
+    await startReset(async () => {
+      await prepared?.reset();
+    });
   });
 
   afterAll(async () => {
+    // Swallowed: the hook that started the Reset has already failed with it, or timed out.
+    await inFlight?.catch(() => {});
+    inFlight = undefined;
     // Returns the heaps this file wrote to 0 bytes, so the next file's first Reset on a
     // fresh backend skips those tables unopened, and clears the dead rows Baseline
     // restores left. Never rejects; unset as above.
