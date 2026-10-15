@@ -6,7 +6,7 @@
 // in isolation.
 //
 //   pnpm build && pnpm generate
-//   node docs/plans/0022-isolate-false/measure-isolate.mjs
+//   node docs/adr/0001-bench/measure-isolate.mjs
 //
 // Needs Docker. Not part of the gate. Everything is generated from the current `dist/`
 // into a scratch directory (SCRATCH, default a fresh one under the OS temp dir; one that
@@ -115,7 +115,7 @@ cpSync(path.join(repo, "prisma"), at("prisma"), { recursive: true });
 cpSync(path.join(repo, "prisma.config.ts"), at("prisma.config.ts"));
 
 if (EXTRA_TABLES > 0) {
-  // bench4's shape (docs/plans/0017-cold-reset/measure-cold.mjs), migrated after the repo's
+  // bench4's shape (docs/adr/0001-bench/bench4.mjs), migrated after the repo's
   // own migrations. The FK column is nullable, so a test fills any table on its own.
   let sql = "";
   for (let i = 1; i <= EXTRA_TABLES; i++) {

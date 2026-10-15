@@ -131,7 +131,7 @@ inserts pay nothing new. The rest of amendment 2 stands.
 
 ## Measurements
 
-Script: [`docs/plans/0038-baseline/measure-baseline.mjs`](../plans/0038-baseline/measure-baseline.mjs).
+Script: [`docs/adr/0002-bench/measure-baseline.mjs`](0002-bench/measure-baseline.mjs).
 It drives the package's own build: the install builders in global setup's order, and
 `prepareReset`. "Before" is `src/reset.ts` as of a113c12, compiled on its own, on a
 template without the harness schema.
@@ -154,10 +154,10 @@ pnpm build
 git show a113c12:src/reset.ts > scratch/old/reset.ts
 node_modules/.bin/tsc --target es2022 --module nodenext --moduleResolution nodenext \
   --outDir scratch/old scratch/old/reset.ts
-RESET_JS=$PWD/scratch/old/reset.js node docs/plans/0038-baseline/measure-baseline.mjs 55438 1 warm cold trigger
-COLD=6 RESET_JS=$PWD/scratch/old/reset.js node docs/plans/0038-baseline/measure-baseline.mjs 55438 20 warm cold
-node docs/plans/0038-baseline/measure-baseline.mjs 55438 20 files
-node docs/plans/0038-baseline/measure-baseline.mjs 55438 1 files
+RESET_JS=$PWD/scratch/old/reset.js node docs/adr/0002-bench/measure-baseline.mjs 55438 1 warm cold trigger
+COLD=6 RESET_JS=$PWD/scratch/old/reset.js node docs/adr/0002-bench/measure-baseline.mjs 55438 20 warm cold
+node docs/adr/0002-bench/measure-baseline.mjs 55438 20 files
+node docs/adr/0002-bench/measure-baseline.mjs 55438 1 files
 ```
 
 Per-test Reset, ms:
